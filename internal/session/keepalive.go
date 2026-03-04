@@ -16,6 +16,9 @@ import (
 	"github.com/netanelbi/colab-tui/internal/config"
 )
 
+// tokenRefreshBuffer is how long before token expiry we should refresh.
+const tokenRefreshBuffer = 5 * time.Minute
+
 func pidPath(endpoint string) string {
 	safe := strings.ReplaceAll(endpoint, "/", "_")
 	return filepath.Join(config.PidDir(), safe+".pid")
@@ -63,9 +66,51 @@ func IsKeepaliveRunning(endpoint string) bool {
 	return err == nil
 }
 
+// refreshProxyTokenIfNeeded checks the session's token expiry and refreshes
+// the proxy token if it's within tokenRefreshBuffer of expiring. It updates
+// the session store on disk so other commands pick up the new token.
+func refreshProxyTokenIfNeeded(ctx context.Context, client *api.Client, store *Store, endpoint string) {
+	sess := findByEndpoint(store, endpoint)
+	if sess == nil {
+		return
+	}
+
+	ttl := time.Until(sess.TokenExpiry)
+	if ttl > tokenRefreshBuffer {
+		return
+	}
+
+	log.Printf("keepalive: proxy token expires in %s, refreshing...", ttl.Round(time.Second))
+	pt, err := client.RefreshProxyToken(ctx, endpoint)
+	if err != nil {
+		log.Printf("keepalive: proxy token refresh failed: %v", err)
+		return
+	}
+
+	sess.Token = pt.Token
+	sess.BaseURL = pt.URL
+	sess.TokenExpiry = time.Now().Add(time.Duration(pt.ExpiresIn) * time.Second)
+
+	if err := store.Save(); err != nil {
+		log.Printf("keepalive: failed to save refreshed token: %v", err)
+	} else {
+		log.Printf("keepalive: proxy token refreshed, expires in %ds", pt.ExpiresIn)
+	}
+}
+
+// findByEndpoint returns the session matching the given endpoint.
+func findByEndpoint(store *Store, endpoint string) *Session {
+	for _, s := range store.List() {
+		if s.Endpoint == endpoint {
+			return s
+		}
+	}
+	return nil
+}
+
 // RunKeepalive is a long-lived loop that pings the Colab runtime every
-// KeepaliveInterval seconds. It writes its PID on startup and removes it on
-// exit. Errors are logged but do not terminate the loop.
+// KeepaliveInterval seconds and refreshes the proxy token before it expires.
+// It writes its PID on startup and removes it on exit.
 func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) error {
 	if err := WritePID(endpoint); err != nil {
 		return fmt.Errorf("write PID: %w", err)
@@ -73,6 +118,13 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 	defer RemovePID(endpoint)
 
 	client := api.NewClient(authMgr)
+
+	// Load session store for proxy token refresh
+	store := NewStore(config.SessionsFile())
+	if err := store.Load(); err != nil {
+		log.Printf("keepalive: warning: could not load session store: %v", err)
+	}
+
 	ticker := time.NewTicker(time.Duration(config.KeepaliveInterval) * time.Second)
 	defer ticker.Stop()
 
@@ -88,6 +140,11 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 				log.Printf("keepalive: error for endpoint %s: %v", endpoint, err)
 			} else {
 				log.Printf("keepalive: pinged endpoint %s", endpoint)
+			}
+
+			// Reload store to get latest state, then refresh token if needed
+			if err := store.Load(); err == nil {
+				refreshProxyTokenIfNeeded(ctx, client, store, endpoint)
 			}
 		}
 	}

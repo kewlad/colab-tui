@@ -260,8 +260,8 @@ func (k *Kernel) Restart() error {
 		}
 	}
 
-	// Reconnect WebSocket
-	wsURL := toWS(k.baseURL) + "/api/kernels/" + k.kernelID + "/channels"
+	// Reconnect WebSocket (must include session_id for Colab proxy)
+	wsURL := toWS(k.baseURL) + "/api/kernels/" + k.kernelID + "/channels?session_id=" + k.sessionID
 	hdr := http.Header{}
 	hdr.Set(config.HProxyToken, k.token)
 	hdr.Set(config.HAgent, config.HAgentVal)
@@ -307,15 +307,24 @@ func (k *Kernel) Close() error {
 	return k.conn.Close()
 }
 
-// CreateSession creates a Jupyter session on the runtime, which starts a kernel
-// and registers the notebook name with Colab. This makes the runtime show
-// "label.ipynb" on the Colab website instead of "Unknown notebook".
+// CreateSession creates a Jupyter session on the runtime, which starts a kernel.
+// The session path uses the "-jvsc-" marker so Colab's "Active Sessions" web UI
+// recognizes it as a VS Code-style session and displays the notebook title.
+// Colab's frontend regex: ^(?!.*fileId=)(.*)(-jvsc-|-intellij-).*(\.[^.]+)$
 func CreateSession(baseURL, token, label string) (kernelID string, err error) {
+	// Strip .ipynb suffix if already present to avoid double extension
+	label = strings.TrimSuffix(label, ".ipynb")
+	nbName := label + ".ipynb"
+
+	// The path must contain "-jvsc-" for Colab's web UI to extract the title.
+	// Format: {title}-jvsc-{id}.{ext} → Colab shows "{title}.{ext}"
+	sessionPath := label + "-jvsc-" + uuid.NewString() + ".ipynb"
+
 	sessionURL := strings.TrimRight(baseURL, "/") + "/api/sessions"
 
 	body := map[string]interface{}{
-		"name": label + ".ipynb",
-		"path": label + ".ipynb",
+		"name": nbName,
+		"path": sessionPath,
 		"type": "notebook",
 		"kernel": map[string]string{
 			"name": "python3",

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -25,17 +26,12 @@ func MakeNBH(u string) string {
 	return s
 }
 
-// StripXSS removes the ")]}'\n" prefix that Google APIs prepend to JSON
+// StripXSS removes the ")]}'\n" XSSI prefix that Google APIs prepend to JSON
 // responses as an XSS defense.
 func StripXSS(body string) string {
-	const prefix = ")]}'\\n"
+	const prefix = ")]}'\n"
 	if strings.HasPrefix(body, prefix) {
 		return body[len(prefix):]
-	}
-	// Also handle literal newline variant
-	const prefix2 = ")]}'\n"
-	if strings.HasPrefix(body, prefix2) {
-		return body[len(prefix2):]
 	}
 	return body
 }
@@ -103,7 +99,6 @@ func (c *Client) doRequest(ctx context.Context, method, path string, headers map
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set(config.HAgent, config.HAgentVal)
-	req.Header.Set(config.HTunnel, config.HTunnelVal)
 
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -282,6 +277,8 @@ func (c *Client) ListAssignments(ctx context.Context) ([]Assignment, error) {
 }
 
 // RefreshProxyToken fetches a fresh proxy token for the given endpoint.
+// The response may use either `tokenExpiresInSeconds` (int, from assign)
+// or `tokenTtl` (string like "3600s", from refresh endpoint).
 func (c *Client) RefreshProxyToken(ctx context.Context, endpoint string) (*ProxyToken, error) {
 	path := config.TunBase + "/runtime-proxy-token?endpoint=" + endpoint + "&port=8080"
 
@@ -291,18 +288,31 @@ func (c *Client) RefreshProxyToken(ctx context.Context, endpoint string) (*Proxy
 	}
 
 	var resp struct {
-		Token     string `json:"token"`
-		URL       string `json:"url"`
-		ExpiresIn int    `json:"tokenExpiresInSeconds"`
+		Token              string `json:"token"`
+		URL                string `json:"url"`
+		TokenExpiresInSec  int    `json:"tokenExpiresInSeconds"`
+		TokenTTL           string `json:"tokenTtl"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("parse proxy token: %w", err)
 	}
 
+	expiresIn := resp.TokenExpiresInSec
+	if expiresIn <= 0 && resp.TokenTTL != "" {
+		// Parse "3600s" format from refresh endpoint
+		ttl := strings.TrimSuffix(resp.TokenTTL, "s")
+		if n, err := strconv.Atoi(ttl); err == nil && n > 0 {
+			expiresIn = n
+		}
+	}
+	if expiresIn <= 0 {
+		expiresIn = 3600 // default fallback
+	}
+
 	return &ProxyToken{
 		Token:     resp.Token,
 		URL:       resp.URL,
-		ExpiresIn: resp.ExpiresIn,
+		ExpiresIn: expiresIn,
 	}, nil
 }
 
@@ -334,7 +344,9 @@ func (c *Client) Unassign(ctx context.Context, endpoint string) error {
 // SendKeepalive pings the runtime to prevent it from being reclaimed.
 func (c *Client) SendKeepalive(ctx context.Context, endpoint string) error {
 	path := config.TunBase + "/" + endpoint + "/keep-alive/"
-	_, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	_, err := c.doRequest(ctx, http.MethodGet, path, map[string]string{
+		config.HTunnel: config.HTunnelVal,
+	})
 	if err != nil {
 		return fmt.Errorf("keepalive: %w", err)
 	}
