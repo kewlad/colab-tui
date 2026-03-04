@@ -7,11 +7,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var verbose bool
+
 func main() {
 	root := &cobra.Command{
-		Use:   "colab",
-		Short: "Colab runtime manager & AI agent gateway",
+		Use:           "colab",
+		Short:         "Colab runtime manager & AI agent gateway",
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
+
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose debug output")
 
 	root.AddCommand(
 		newAuthCmd(),
@@ -29,7 +35,7 @@ func main() {
 	)
 
 	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }

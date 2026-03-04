@@ -5,11 +5,14 @@ import (
 	"strings"
 )
 
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z~]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]`)
+var tmuxStatusRe = regexp.MustCompile(`(?m)^\[[\d]+\]\s+\d+:.*$`)
 
 // StripAnsi removes ANSI escape sequences from s.
 func StripAnsi(s string) string {
-	return ansiRe.ReplaceAllString(s, "")
+	s = ansiRe.ReplaceAllString(s, "")
+	s = tmuxStatusRe.ReplaceAllString(s, "")
+	return s
 }
 
 // CleanOutput strips the echoed command line, the marker line, and the trailing

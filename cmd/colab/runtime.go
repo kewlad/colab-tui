@@ -64,6 +64,7 @@ func newStartCmd() *cobra.Command {
 				return err
 			}
 			client := api.NewClient(authMgr)
+			client.Verbose = verbose
 
 			variant := "DEFAULT"
 			if gpu {

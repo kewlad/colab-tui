@@ -10,7 +10,7 @@ const (
 	ColabDomain  = "https://colab.research.google.com"
 	ClientID     = "REDACTED-OAUTH-CLIENT-ID"
 	ClientSecret = "REDACTED-OAUTH-CLIENT-SECRET"
-	OAuthScope   = "https://www.googleapis.com/auth/colaboratory"
+	OAuthScope   = "profile email https://www.googleapis.com/auth/colaboratory"
 	TokenURL     = "https://oauth2.googleapis.com/token"
 	AuthURL      = "https://accounts.google.com/o/oauth2/v2/auth"
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/google/uuid"
@@ -66,8 +67,9 @@ type ProxyToken struct {
 
 // Client is the Colab API client.
 type Client struct {
-	Auth *auth.Manager
-	HTTP *http.Client
+	Auth    *auth.Manager
+	HTTP    *http.Client
+	Verbose bool
 }
 
 // NewClient creates a new API client using the given auth manager.
@@ -81,9 +83,15 @@ func NewClient(authMgr *auth.Manager) *Client {
 // doRequest performs an HTTP request against the Colab API, injecting auth
 // and standard headers, and stripping the XSS prefix from the response body.
 func (c *Client) doRequest(ctx context.Context, method, path string, headers map[string]string) ([]byte, error) {
-	url := config.ColabDomain + path
+	fullURL := config.ColabDomain + path
+	// Google requires authuser param on all colab domain requests
+	if strings.Contains(fullURL, "?") {
+		fullURL += "&authuser=0"
+	} else {
+		fullURL += "?authuser=0"
+	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -101,6 +109,17 @@ func (c *Client) doRequest(ctx context.Context, method, path string, headers map
 		req.Header.Set(k, v)
 	}
 
+	if c.Verbose {
+		fmt.Fprintf(os.Stderr, "[DEBUG] %s %s\n", method, fullURL)
+		for k, v := range req.Header {
+			if k == "Authorization" {
+				fmt.Fprintf(os.Stderr, "[DEBUG]   %s: Bearer %s...%s\n", k, v[0][7:15], v[0][len(v[0])-4:])
+			} else {
+				fmt.Fprintf(os.Stderr, "[DEBUG]   %s: %s\n", k, v[0])
+			}
+		}
+	}
+
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("do request: %w", err)
@@ -110,6 +129,10 @@ func (c *Client) doRequest(ctx context.Context, method, path string, headers map
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if c.Verbose {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Response: %d (%d bytes)\n", resp.StatusCode, len(body))
 	}
 
 	if resp.StatusCode >= 400 {
@@ -125,15 +148,15 @@ func (c *Client) Assign(ctx context.Context, variant, accelerator, shape string)
 	u := uuid.New().String()
 	nbh := MakeNBH(u)
 
-	path := config.TunBase + "/assign?notebook_url=colab.research.google.com&nbh=" + nbh
-	if variant != "" && variant != "DEFAULT" {
-		path += "&variant=" + variant
+	if variant == "" {
+		variant = "DEFAULT"
 	}
+	path := config.TunBase + "/assign?nbh=" + nbh + "&variant=" + variant
 	if accelerator != "" {
 		path += "&accelerator=" + accelerator
 	}
 	if shape != "" {
-		path += "&machine_shape=" + shape
+		path += "&shape=" + shape
 	}
 
 	body, err := c.doRequest(ctx, http.MethodGet, path, nil)
@@ -141,54 +164,85 @@ func (c *Client) Assign(ctx context.Context, variant, accelerator, shape string)
 		return nil, fmt.Errorf("assign GET: %w", err)
 	}
 
-	var resp struct {
-		Token    string `json:"token"`
-		Outcome  *int   `json:"outcome"`
-		Endpoint string `json:"endpoint"`
-		Variant  string `json:"variant"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
+	// Use raw JSON since variant can be string or number
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parse assign response: %w", err)
 	}
 
+	// Extract XSRF token from GET response
+	var xsrfToken string
+	if t, ok := raw["token"]; ok {
+		json.Unmarshal(t, &xsrfToken)
+	}
+
 	// If XSRF token present, repeat as POST
-	if resp.Token != "" {
+	if xsrfToken != "" {
 		body, err = c.doRequest(ctx, http.MethodPost, path, map[string]string{
-			config.HXsrf: resp.Token,
+			config.HXsrf: xsrfToken,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("assign POST: %w", err)
 		}
-		if err := json.Unmarshal(body, &resp); err != nil {
+		raw = nil
+		if err := json.Unmarshal(body, &raw); err != nil {
 			return nil, fmt.Errorf("parse assign POST response: %w", err)
 		}
 	}
 
 	// Check outcome: 0, 4, or nil = ok; 1/2 = quota error; 5 = banned
-	if resp.Outcome != nil {
-		switch *resp.Outcome {
-		case 1, 2:
-			return nil, fmt.Errorf("quota exceeded (outcome=%d)", *resp.Outcome)
-		case 5:
-			return nil, fmt.Errorf("account banned (outcome=5)")
+	if o, ok := raw["outcome"]; ok {
+		var outcome int
+		if json.Unmarshal(o, &outcome) == nil {
+			switch outcome {
+			case 1, 2:
+				return nil, fmt.Errorf("quota exceeded (outcome=%d)", outcome)
+			case 5:
+				return nil, fmt.Errorf("account banned (outcome=5)")
+			}
 		}
 	}
 
-	if resp.Endpoint == "" {
-		return nil, fmt.Errorf("assign returned empty endpoint")
+	var endpoint string
+	if e, ok := raw["endpoint"]; ok {
+		json.Unmarshal(e, &endpoint)
+	}
+	if endpoint == "" {
+		return nil, fmt.Errorf("assign returned empty endpoint, response: %s", string(body))
 	}
 
-	pt, err := c.RefreshProxyToken(ctx, resp.Endpoint)
+	pt, err := c.RefreshProxyToken(ctx, endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("get proxy token: %w", err)
 	}
 
+	// Variant may be string ("GPU") or number (0=DEFAULT, 1=GPU, 2=TPU)
+	variantStr := variant
+	if v, ok := raw["variant"]; ok {
+		var vs string
+		if json.Unmarshal(v, &vs) == nil {
+			variantStr = vs
+		} else {
+			var vi int
+			if json.Unmarshal(v, &vi) == nil {
+				switch vi {
+				case 0:
+					variantStr = "DEFAULT"
+				case 1:
+					variantStr = "GPU"
+				case 2:
+					variantStr = "TPU"
+				}
+			}
+		}
+	}
+
 	return &RuntimeInfo{
-		Endpoint:    resp.Endpoint,
+		Endpoint:    endpoint,
 		BaseURL:     pt.URL,
 		Token:       pt.Token,
 		ExpiresIn:   pt.ExpiresIn,
-		Variant:     resp.Variant,
+		Variant:     variantStr,
 		Accelerator: accelerator,
 	}, nil
 }
@@ -236,7 +290,7 @@ func (c *Client) RefreshProxyToken(ctx context.Context, endpoint string) (*Proxy
 	var resp struct {
 		Token     string `json:"token"`
 		URL       string `json:"url"`
-		ExpiresIn int    `json:"expires_in"`
+		ExpiresIn int    `json:"tokenExpiresInSeconds"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("parse proxy token: %w", err)
