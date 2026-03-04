@@ -311,6 +311,40 @@ func newResumeCmd() *cobra.Command {
 	}
 }
 
+func newRestartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart [LABEL]",
+		Short: "Restart the Jupyter kernel (frees GPU memory)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, store, err := loadAuthAndStore()
+			if err != nil {
+				return err
+			}
+			label := ""
+			if len(args) > 0 {
+				label = args[0]
+			}
+			s, err := resolveSession(store, label)
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Restarting kernel on %s...\n", s.Label)
+			k, err := runtime.NewKernel(s.BaseURL, s.Token)
+			if err != nil {
+				return fmt.Errorf("connect kernel: %w", err)
+			}
+			defer k.Close()
+
+			if err := k.Restart(); err != nil {
+				return fmt.Errorf("restart kernel: %w", err)
+			}
+			fmt.Println("Kernel restarted. GPU memory freed.")
+			return nil
+		},
+	}
+}
+
 func newKeepaliveCmd() *cobra.Command {
 	var endpoint string
 	cmd := &cobra.Command{

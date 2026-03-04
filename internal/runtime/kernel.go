@@ -179,6 +179,81 @@ func (k *Kernel) GetStatus() (string, error) {
 	return info.ExecutionState, nil
 }
 
+// Restart restarts the kernel via the Jupyter REST API, freeing GPU memory.
+// It closes the existing WebSocket and reconnects after the restart completes.
+func (k *Kernel) Restart() error {
+	k.conn.Close()
+
+	url := strings.TrimRight(k.baseURL, "/") + "/api/kernels/" + k.kernelID + "/restart"
+	req, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("kernel restart request: %w", err)
+	}
+	req.Header.Set(config.HProxyToken, k.token)
+	req.Header.Set(config.HAgent, config.HAgentVal)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("kernel restart: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("kernel restart failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	// Wait for kernel to come back (poll status up to 30s)
+	for i := 0; i < 30; i++ {
+		time.Sleep(time.Second)
+		state, err := k.getStatusHTTP()
+		if err == nil && (state == "idle" || state == "starting") {
+			break
+		}
+	}
+
+	// Reconnect WebSocket
+	wsURL := toWS(k.baseURL) + "/api/kernels/" + k.kernelID + "/channels"
+	hdr := http.Header{}
+	hdr.Set(config.HProxyToken, k.token)
+	hdr.Set(config.HAgent, config.HAgentVal)
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	if err != nil {
+		return fmt.Errorf("kernel reconnect after restart: %w", err)
+	}
+	k.conn = conn
+	return nil
+}
+
+// getStatusHTTP fetches kernel status without using the WebSocket.
+func (k *Kernel) getStatusHTTP() (string, error) {
+	url := strings.TrimRight(k.baseURL, "/") + "/api/kernels/" + k.kernelID
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set(config.HProxyToken, k.token)
+	req.Header.Set(config.HAgent, config.HAgentVal)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var info kernelInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return "", err
+	}
+	return info.ExecutionState, nil
+}
+
 // Close closes the underlying WebSocket connection.
 func (k *Kernel) Close() error {
 	return k.conn.Close()

@@ -19,6 +19,7 @@ func main() {
 		newStopCmd(),
 		newListCmd(),
 		newStatusCmd(),
+		newRestartCmd(),
 		newResumeCmd(),
 		newExecCmd(),
 		newPythonCmd(),
