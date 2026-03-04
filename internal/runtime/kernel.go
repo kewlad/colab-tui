@@ -131,6 +131,45 @@ type jupyterMsg struct {
 	Channel      string                 `json:"channel,omitempty"`
 }
 
+// handleColabRequest checks if a WebSocket message is a colab_request
+// (e.g. request_auth for Drive mount) and auto-replies with input_reply.
+// Returns true if the message was handled.
+func (k *Kernel) handleColabRequest(resp map[string]interface{}) bool {
+	hdr, _ := resp["header"].(map[string]interface{})
+	msgType, _ := hdr["msg_type"].(string)
+	if msgType != "colab_request" {
+		return false
+	}
+
+	// Extract colab_msg_id from metadata
+	meta, _ := resp["metadata"].(map[string]interface{})
+	colabMsgID, _ := meta["colab_msg_id"].(float64) // JSON numbers are float64
+
+	// Send input_reply to unblock the kernel
+	reply := map[string]interface{}{
+		"header": map[string]string{
+			"msg_id":   uuid.NewString(),
+			"msg_type": "input_reply",
+			"session":  k.sessionID,
+			"date":     time.Now().UTC().Format(time.RFC3339),
+			"username": "username",
+			"version":  "5.0",
+		},
+		"content": map[string]interface{}{
+			"value": map[string]interface{}{
+				"type":         "colab_reply",
+				"colab_msg_id": int(colabMsgID),
+			},
+		},
+		"channel":       "stdin",
+		"metadata":      map[string]interface{}{},
+		"parent_header": map[string]interface{}{},
+	}
+
+	k.conn.WriteJSON(reply)
+	return true
+}
+
 // Execute sends code to the kernel and collects output until execute_reply.
 func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
 	msgID := uuid.NewString()
@@ -167,6 +206,11 @@ func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
 		var resp map[string]interface{}
 		if err := k.conn.ReadJSON(&resp); err != nil {
 			return "", fmt.Errorf("kernel execute read: %w", err)
+		}
+
+		// Handle colab_request messages (e.g. Drive auth)
+		if k.handleColabRequest(resp) {
+			continue
 		}
 
 		hdr, _ := resp["header"].(map[string]interface{})
@@ -234,6 +278,11 @@ func (k *Kernel) ExecuteStream(code string, w io.Writer, timeout time.Duration) 
 		var resp map[string]interface{}
 		if err := k.conn.ReadJSON(&resp); err != nil {
 			return fmt.Errorf("kernel execute read: %w", err)
+		}
+
+		// Handle colab_request messages (e.g. Drive auth)
+		if k.handleColabRequest(resp) {
+			continue
 		}
 
 		hdr, _ := resp["header"].(map[string]interface{})

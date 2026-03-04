@@ -32,6 +32,7 @@ func main() {
 		newPsCmd(),
 		newLogsCmd(),
 		newKeepaliveCmd(),
+		newDriveCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

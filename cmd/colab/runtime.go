@@ -54,6 +54,7 @@ func newStartCmd() *cobra.Command {
 		highmem     bool
 		accelerator string
 		label       string
+		gdrive      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -134,6 +135,13 @@ func newStartCmd() *cobra.Command {
 			} else {
 				fmt.Printf("  Kernel:      %s\n", kernelID)
 			}
+
+			if gdrive {
+				fmt.Println()
+				if err := mountDrive(context.Background(), client, info.Endpoint, info.BaseURL, info.Token, "/content/drive", 120*time.Second); err != nil {
+					fmt.Printf("Warning: Drive mount failed: %v\n", err)
+				}
+			}
 			return nil
 		},
 	}
@@ -142,6 +150,7 @@ func newStartCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&highmem, "highmem", false, "Request high-memory shape")
 	cmd.Flags().StringVar(&accelerator, "accelerator", "", "Accelerator type (e.g. T4, A100, L4)")
 	cmd.Flags().StringVar(&label, "label", "", "Label for this runtime")
+	cmd.Flags().BoolVar(&gdrive, "gdrive", false, "Mount Google Drive after starting")
 	return cmd
 }
 

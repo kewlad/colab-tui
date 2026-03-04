@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Go CLI (`colab`) that manages Google Colab runtimes without VS Code. Reverse-engineered from the Colab VS Code extension. Supports multiple named runtimes, background keepalive, GPU/RAM selection, shell exec, and Jupyter kernel execution.
+Go CLI (`colab`) that manages Google Colab runtimes without VS Code. Reverse-engineered from the Colab VS Code extension. Supports multiple named runtimes, background keepalive, GPU/RAM selection, shell exec, Jupyter kernel execution, and Google Drive mounting.
 
 ## Commands
 
@@ -14,10 +14,10 @@ go test ./...                    # run all tests
 ## Architecture
 
 ```
-cmd/colab/          # Cobra CLI commands (main, auth, runtime, exec)
+cmd/colab/          # Cobra CLI commands (main, auth, runtime, exec, drive)
 internal/
   auth/             # OAuth2 + PKCE browser flow
-  api/              # Colab HTTP API client (assign, unassign, keepalive, proxy token)
+  api/              # Colab HTTP API client (assign, unassign, keepalive, proxy token, credentials propagation)
   config/           # Protocol constants, paths
   runtime/          # TTY WebSocket, Jupyter kernel WebSocket, ANSI stripping
   session/          # JSON session persistence, keepalive daemon
@@ -58,11 +58,16 @@ Key findings from reverse engineering:
 - Extension uses two domains: `colabDomain` for tunnel, `colabGapiDomain` for `v1/*` endpoints
 - Kernel WS: extension delegates URL construction to vscode-jupyter (session_id added by JupyterLab services)
 - Terminal WS: extension does NOT send X-Colab-Client-Agent on terminal WS (only proxy token)
+- Drive mount: `colab_request` message on kernel WS with `metadata.colab_request_type: "request_auth"` and `content.request.authType: "dfs_ephemeral"`
+- Drive auth reply: `input_reply` on stdin channel with `content.value: {type: "colab_reply", colab_msg_id: N}`
+- Credentials propagation: `GET/POST /tun/m/credentials-propagation/{endpoint}?authtype=dfs_ephemeral&version=2&dryrun=true/false&propagate=true&record=false` (XSRF pattern)
+- Drive consent uses Google internal client ID `947318989803-...` (different from our Colab client), redirect to `/tun/m/authorize-for-drive-credentials-ephem`
+- `drive.mount()` uses FUSE binary at `/opt/google/drive/drive` with metadata server at `TBE_EPHEM_CREDS_ADDR` (172.28.0.1:8009)
 
 ## Known Limitations
 
 - **"Unknown notebook" in Colab Active Sessions** — expected behavior, same as VS Code extension. Colab resolves `nbh` against Drive; both we and the extension send `randomUUID()` as `nbh`, so no Drive file matches. Only Colab web UI sessions (opened from colab.research.google.com) show real names because they use `SHA256(driveFileId)`.
 - `colab python` requires a kernel (created automatically by `colab start` via `CreateSession`)
 - Keep-alive pings unconditionally (extension checks kernel connections > 0 first)
-- No ephemeral Drive auth handling — `drive.mount()` in kernel will hang (extension handles `colab_request`/`request_auth` messages)
+- Drive mounting requires one-time browser consent via `colab drive auth` (same as VS Code extension). After consent, `colab drive mount` and `colab start --gdrive` work automatically
 - Extension uses separate `colabGapiDomain` for `v1/*` endpoints; we route everything through `colabDomain`

@@ -341,6 +341,57 @@ func (c *Client) Unassign(ctx context.Context, endpoint string) error {
 	return nil
 }
 
+// CredentialsPropagationResult holds the result of a credentials propagation request.
+type CredentialsPropagationResult struct {
+	Success              bool   `json:"success"`
+	UnauthorizedRedirect string `json:"unauthorized_redirect_uri"`
+}
+
+// PropagateCredentials propagates ephemeral credentials (e.g. Drive) to the
+// runtime's metadata server. Uses the same XSRF GET/POST pattern as other
+// Colab endpoints.
+//
+// When dryRun is true, it checks whether credentials are already propagated.
+// If success is false and UnauthorizedRedirect is non-empty, the user must
+// complete a one-time browser consent at that URL before retrying with
+// dryRun=false.
+func (c *Client) PropagateCredentials(ctx context.Context, endpoint, authType string, dryRun bool) (*CredentialsPropagationResult, error) {
+	path := fmt.Sprintf("%s/credentials-propagation/%s?authtype=%s&version=2&dryrun=%t&propagate=true&record=false",
+		config.TunBase, endpoint, authType, dryRun)
+
+	// GET to obtain XSRF token
+	body, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("credentials propagation GET: %w", err)
+	}
+
+	var xsrf struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &xsrf); err != nil {
+		return nil, fmt.Errorf("parse credentials XSRF: %w", err)
+	}
+
+	if xsrf.Token == "" {
+		return nil, fmt.Errorf("no XSRF token in credentials propagation response")
+	}
+
+	// POST with XSRF token
+	body, err = c.doRequest(ctx, http.MethodPost, path, map[string]string{
+		config.HXsrf: xsrf.Token,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("credentials propagation POST: %w", err)
+	}
+
+	var result CredentialsPropagationResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse credentials propagation result: %w", err)
+	}
+
+	return &result, nil
+}
+
 // SendKeepalive pings the runtime to prevent it from being reclaimed.
 func (c *Client) SendKeepalive(ctx context.Context, endpoint string) error {
 	path := config.TunBase + "/" + endpoint + "/keep-alive/"
