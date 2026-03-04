@@ -1,0 +1,285 @@
+// Package api provides a client for the Colab runtime management API.
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/netanelbi/colab-tui/internal/auth"
+	"github.com/netanelbi/colab-tui/internal/config"
+)
+
+// MakeNBH converts a UUID string into the notebook handle format used by the
+// Colab API: dashes replaced with underscores, padded with dots to length 44.
+func MakeNBH(u string) string {
+	s := strings.ReplaceAll(u, "-", "_")
+	for len(s) < 44 {
+		s += "."
+	}
+	return s
+}
+
+// StripXSS removes the ")]}'\n" prefix that Google APIs prepend to JSON
+// responses as an XSS defense.
+func StripXSS(body string) string {
+	const prefix = ")]}'\\n"
+	if strings.HasPrefix(body, prefix) {
+		return body[len(prefix):]
+	}
+	// Also handle literal newline variant
+	const prefix2 = ")]}'\n"
+	if strings.HasPrefix(body, prefix2) {
+		return body[len(prefix2):]
+	}
+	return body
+}
+
+// RuntimeInfo holds the result of a successful runtime assignment.
+type RuntimeInfo struct {
+	Endpoint    string
+	BaseURL     string
+	Token       string
+	ExpiresIn   int
+	Variant     string
+	Accelerator string
+}
+
+// Assignment represents a currently allocated Colab runtime.
+type Assignment struct {
+	Endpoint     string
+	Variant      string
+	Accelerator  string
+	MachineShape string
+}
+
+// ProxyToken holds a short-lived proxy token for WebSocket connections.
+type ProxyToken struct {
+	Token     string
+	URL       string
+	ExpiresIn int
+}
+
+// Client is the Colab API client.
+type Client struct {
+	Auth *auth.Manager
+	HTTP *http.Client
+}
+
+// NewClient creates a new API client using the given auth manager.
+func NewClient(authMgr *auth.Manager) *Client {
+	return &Client{
+		Auth: authMgr,
+		HTTP: &http.Client{},
+	}
+}
+
+// doRequest performs an HTTP request against the Colab API, injecting auth
+// and standard headers, and stripping the XSS prefix from the response body.
+func (c *Client) doRequest(ctx context.Context, method, path string, headers map[string]string) ([]byte, error) {
+	url := config.ColabDomain + path
+
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	token, err := c.Auth.GetAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get auth token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set(config.HAgent, config.HAgentVal)
+	req.Header.Set(config.HTunnel, config.HTunnelVal)
+
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	return []byte(StripXSS(string(body))), nil
+}
+
+// Assign requests a new Colab runtime. It handles the XSRF two-step and
+// interprets the outcome field before fetching a proxy token.
+func (c *Client) Assign(ctx context.Context, variant, accelerator, shape string) (*RuntimeInfo, error) {
+	u := uuid.New().String()
+	nbh := MakeNBH(u)
+
+	path := config.TunBase + "/assign?notebook_url=colab.research.google.com&nbh=" + nbh
+	if variant != "" && variant != "DEFAULT" {
+		path += "&variant=" + variant
+	}
+	if accelerator != "" {
+		path += "&accelerator=" + accelerator
+	}
+	if shape != "" {
+		path += "&machine_shape=" + shape
+	}
+
+	body, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("assign GET: %w", err)
+	}
+
+	var resp struct {
+		Token    string `json:"token"`
+		Outcome  *int   `json:"outcome"`
+		Endpoint string `json:"endpoint"`
+		Variant  string `json:"variant"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse assign response: %w", err)
+	}
+
+	// If XSRF token present, repeat as POST
+	if resp.Token != "" {
+		body, err = c.doRequest(ctx, http.MethodPost, path, map[string]string{
+			config.HXsrf: resp.Token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("assign POST: %w", err)
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("parse assign POST response: %w", err)
+		}
+	}
+
+	// Check outcome: 0, 4, or nil = ok; 1/2 = quota error; 5 = banned
+	if resp.Outcome != nil {
+		switch *resp.Outcome {
+		case 1, 2:
+			return nil, fmt.Errorf("quota exceeded (outcome=%d)", *resp.Outcome)
+		case 5:
+			return nil, fmt.Errorf("account banned (outcome=5)")
+		}
+	}
+
+	if resp.Endpoint == "" {
+		return nil, fmt.Errorf("assign returned empty endpoint")
+	}
+
+	pt, err := c.RefreshProxyToken(ctx, resp.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("get proxy token: %w", err)
+	}
+
+	return &RuntimeInfo{
+		Endpoint:    resp.Endpoint,
+		BaseURL:     pt.URL,
+		Token:       pt.Token,
+		ExpiresIn:   pt.ExpiresIn,
+		Variant:     resp.Variant,
+		Accelerator: accelerator,
+	}, nil
+}
+
+// ListAssignments returns all currently active runtime assignments.
+func (c *Client) ListAssignments(ctx context.Context) ([]Assignment, error) {
+	body, err := c.doRequest(ctx, http.MethodGet, config.TunBase+"/assignments", nil)
+	if err != nil {
+		return nil, fmt.Errorf("list assignments: %w", err)
+	}
+
+	var resp struct {
+		Assignments []struct {
+			Endpoint     string `json:"endpoint"`
+			Variant      string `json:"variant"`
+			Accelerator  string `json:"accelerator"`
+			MachineShape string `json:"machine_shape"`
+		} `json:"assignments"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse assignments: %w", err)
+	}
+
+	out := make([]Assignment, 0, len(resp.Assignments))
+	for _, a := range resp.Assignments {
+		out = append(out, Assignment{
+			Endpoint:     a.Endpoint,
+			Variant:      a.Variant,
+			Accelerator:  a.Accelerator,
+			MachineShape: a.MachineShape,
+		})
+	}
+	return out, nil
+}
+
+// RefreshProxyToken fetches a fresh proxy token for the given endpoint.
+func (c *Client) RefreshProxyToken(ctx context.Context, endpoint string) (*ProxyToken, error) {
+	path := config.TunBase + "/runtime-proxy-token?endpoint=" + endpoint + "&port=8080"
+
+	body, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("refresh proxy token: %w", err)
+	}
+
+	var resp struct {
+		Token     string `json:"token"`
+		URL       string `json:"url"`
+		ExpiresIn int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse proxy token: %w", err)
+	}
+
+	return &ProxyToken{
+		Token:     resp.Token,
+		URL:       resp.URL,
+		ExpiresIn: resp.ExpiresIn,
+	}, nil
+}
+
+// Unassign releases a runtime. It performs the XSRF GET/POST dance.
+func (c *Client) Unassign(ctx context.Context, endpoint string) error {
+	path := config.TunBase + "/unassign/" + endpoint
+
+	body, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return fmt.Errorf("unassign GET: %w", err)
+	}
+
+	var xsrf struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &xsrf); err != nil {
+		return fmt.Errorf("parse unassign XSRF: %w", err)
+	}
+
+	_, err = c.doRequest(ctx, http.MethodPost, path, map[string]string{
+		config.HXsrf: xsrf.Token,
+	})
+	if err != nil {
+		return fmt.Errorf("unassign POST: %w", err)
+	}
+	return nil
+}
+
+// SendKeepalive pings the runtime to prevent it from being reclaimed.
+func (c *Client) SendKeepalive(ctx context.Context, endpoint string) error {
+	path := config.TunBase + "/" + endpoint + "/keep-alive/"
+	_, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return fmt.Errorf("keepalive: %w", err)
+	}
+	return nil
+}

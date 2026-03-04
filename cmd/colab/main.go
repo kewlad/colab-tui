@@ -12,7 +12,21 @@ func main() {
 		Use:   "colab",
 		Short: "Colab runtime manager & AI agent gateway",
 	}
-	// subcommands added in later tasks
+
+	root.AddCommand(
+		newAuthCmd(),
+		newStartCmd(),
+		newStopCmd(),
+		newListCmd(),
+		newStatusCmd(),
+		newResumeCmd(),
+		newExecCmd(),
+		newPythonCmd(),
+		newPsCmd(),
+		newLogsCmd(),
+		newKeepaliveCmd(),
+	)
+
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
