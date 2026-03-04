@@ -70,9 +70,10 @@ func newExecCmd() *cobra.Command {
 
 func newPythonCmd() *cobra.Command {
 	var (
-		label   string
-		file    string
-		timeout int
+		label    string
+		file     string
+		noStream bool
+		timeout  int
 	)
 	cmd := &cobra.Command{
 		Use:   "python CODE",
@@ -106,7 +107,13 @@ func newPythonCmd() *cobra.Command {
 			}
 			defer k.Close()
 
-			output, err := k.Execute(code, time.Duration(timeout)*time.Second)
+			dur := time.Duration(timeout) * time.Second
+
+			if !noStream {
+				return k.ExecuteStream(code, os.Stdout, dur)
+			}
+
+			output, err := k.Execute(code, dur)
 			if err != nil {
 				return err
 			}
@@ -118,6 +125,7 @@ func newPythonCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Python file to execute")
+	cmd.Flags().BoolVar(&noStream, "no-stream", false, "Buffer all output (don't stream)")
 	cmd.Flags().IntVar(&timeout, "timeout", 300, "Timeout in seconds")
 	return cmd
 }

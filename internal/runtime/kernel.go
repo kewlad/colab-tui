@@ -199,6 +199,80 @@ func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
 	}
 }
 
+// ExecuteStream sends code to the kernel and streams output to w in real-time.
+func (k *Kernel) ExecuteStream(code string, w io.Writer, timeout time.Duration) error {
+	msgID := uuid.NewString()
+
+	msg := jupyterMsg{
+		Header: map[string]string{
+			"msg_id":   msgID,
+			"msg_type": "execute_request",
+			"session":  k.sessionID,
+			"username": "",
+			"version":  "5.2",
+		},
+		ParentHeader: map[string]interface{}{},
+		Metadata:     map[string]interface{}{},
+		Content: map[string]interface{}{
+			"code":          code,
+			"silent":        false,
+			"store_history": true,
+			"allow_stdin":   false,
+			"stop_on_error": true,
+		},
+		Channel: "shell",
+	}
+
+	if err := k.conn.WriteJSON(msg); err != nil {
+		return fmt.Errorf("kernel execute write: %w", err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	k.conn.SetReadDeadline(deadline)
+
+	for {
+		var resp map[string]interface{}
+		if err := k.conn.ReadJSON(&resp); err != nil {
+			return fmt.Errorf("kernel execute read: %w", err)
+		}
+
+		hdr, _ := resp["header"].(map[string]interface{})
+		msgType, _ := hdr["msg_type"].(string)
+		content, _ := resp["content"].(map[string]interface{})
+
+		switch msgType {
+		case "stream":
+			if text, ok := content["text"].(string); ok {
+				fmt.Fprint(w, text)
+			}
+		case "execute_result":
+			if data, ok := content["data"].(map[string]interface{}); ok {
+				if text, ok := data["text/plain"].(string); ok {
+					fmt.Fprintln(w, text)
+				}
+			}
+		case "error":
+			// Print traceback to stderr-like output, then return error
+			if tb, ok := content["traceback"].([]interface{}); ok {
+				for _, line := range tb {
+					if s, ok := line.(string); ok {
+						fmt.Fprintln(w, s)
+					}
+				}
+			}
+			ename, _ := content["ename"].(string)
+			evalue, _ := content["evalue"].(string)
+			return fmt.Errorf("kernel error %s: %s", ename, evalue)
+		case "execute_reply":
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("kernel execute timeout")
+		}
+	}
+}
+
 // GetStatus returns the execution_state of the kernel.
 func (k *Kernel) GetStatus() (string, error) {
 	url := strings.TrimRight(k.baseURL, "/") + "/api/kernels/" + k.kernelID
