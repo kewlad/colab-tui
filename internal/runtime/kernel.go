@@ -16,10 +16,11 @@ import (
 
 // Kernel holds a WebSocket connection to a Jupyter kernel.
 type Kernel struct {
-	conn     *websocket.Conn
-	kernelID string
-	baseURL  string
-	token    string
+	conn      *websocket.Conn
+	kernelID  string
+	sessionID string
+	baseURL   string
+	token     string
 }
 
 // kernelInfo is used to parse the /api/kernels list response.
@@ -32,10 +33,15 @@ type kernelInfo struct {
 func NewKernel(baseURL, token string) (*Kernel, error) {
 	kernelID, err := fetchFirstKernelID(baseURL, token)
 	if err != nil {
-		return nil, err
+		// No kernels — try creating a session to start one
+		kernelID, err = CreateSession(baseURL, token, "colab-tui")
+		if err != nil {
+			return nil, fmt.Errorf("no kernels and session creation failed: %w", err)
+		}
 	}
 
-	wsURL := toWS(baseURL) + "/api/kernels/" + kernelID + "/channels"
+	sessionID := uuid.NewString()
+	wsURL := toWS(baseURL) + "/api/kernels/" + kernelID + "/channels?session_id=" + sessionID
 	hdr := http.Header{}
 	hdr.Set(config.HProxyToken, token)
 	hdr.Set(config.HAgent, config.HAgentVal)
@@ -45,7 +51,44 @@ func NewKernel(baseURL, token string) (*Kernel, error) {
 		return nil, fmt.Errorf("kernel dial: %w", err)
 	}
 
-	return &Kernel{conn: conn, kernelID: kernelID, baseURL: baseURL, token: token}, nil
+	k := &Kernel{conn: conn, kernelID: kernelID, sessionID: sessionID, baseURL: baseURL, token: token}
+
+	// Send kernel_info_request and drain initial messages (required handshake).
+	infoMsg := jupyterMsg{
+		Header: map[string]string{
+			"msg_id":   uuid.NewString(),
+			"msg_type": "kernel_info_request",
+			"session":  sessionID,
+			"username": "",
+			"version":  "5.2",
+		},
+		ParentHeader: map[string]interface{}{},
+		Metadata:     map[string]interface{}{},
+		Content:      map[string]interface{}{},
+		Channel:      "shell",
+	}
+	if err := conn.WriteJSON(infoMsg); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("kernel info request: %w", err)
+	}
+
+	// Drain until kernel_info_reply
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	for {
+		var resp map[string]interface{}
+		if err := conn.ReadJSON(&resp); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("kernel handshake: %w", err)
+		}
+		if hdr, ok := resp["header"].(map[string]interface{}); ok {
+			if mt, _ := hdr["msg_type"].(string); mt == "kernel_info_reply" {
+				break
+			}
+		}
+	}
+	conn.SetReadDeadline(time.Time{}) // clear deadline
+
+	return k, nil
 }
 
 func fetchFirstKernelID(baseURL, token string) (string, error) {
@@ -91,21 +134,25 @@ type jupyterMsg struct {
 // Execute sends code to the kernel and collects output until execute_reply.
 func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
 	msgID := uuid.NewString()
-	sessionID := uuid.NewString()
 
 	msg := jupyterMsg{
 		Header: map[string]string{
 			"msg_id":   msgID,
 			"msg_type": "execute_request",
-			"session":  sessionID,
+			"session":  k.sessionID,
+			"username": "",
+			"version":  "5.2",
 		},
 		ParentHeader: map[string]interface{}{},
 		Metadata:     map[string]interface{}{},
 		Content: map[string]interface{}{
-			"code":          code,
-			"silent":        false,
-			"store_history": true,
+			"code":            code,
+			"silent":          false,
+			"store_history":   true,
+			"allow_stdin":     false,
+			"stop_on_error":   true,
 		},
+		Channel: "shell",
 	}
 
 	if err := k.conn.WriteJSON(msg); err != nil {
