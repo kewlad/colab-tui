@@ -139,6 +139,8 @@ func extractBetweenMarkers(raw, startMarker, endMarker, cmd string) string {
 }
 
 // ExecStream runs cmd and writes each received chunk to w, stopping at the marker.
+// It waits for the SECOND occurrence of startMarker (the actual echo output, not the
+// command echo) before streaming, and strips \r characters for clean output.
 func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
 	id := randHex(12)
 	startMarker := "START_" + id
@@ -152,7 +154,9 @@ func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	t.conn.SetReadDeadline(deadline)
 
+	startCount := 0
 	started := false
+	lastEndedNewline := false
 	var accumulated strings.Builder
 
 	for {
@@ -161,39 +165,77 @@ func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
 			return fmt.Errorf("tty stream read: %w", err)
 		}
 		chunk := StripAnsi(msg.Data)
+		chunk = strings.ReplaceAll(chunk, "\r", "")
 		accumulated.WriteString(chunk)
-		full := accumulated.String()
 
 		if !started {
-			// Wait for start marker
-			if idx := strings.Index(full, startMarker); idx >= 0 {
+			full := accumulated.String()
+			// Count occurrences of startMarker — need the 2nd one
+			// (1st is in command echo, 2nd is actual output)
+			count := strings.Count(full, startMarker)
+			if count > startCount {
+				startCount = count
+			}
+			if startCount >= 2 {
 				started = true
-				after := full[idx+len(startMarker):]
+				// Find the second occurrence
+				firstIdx := strings.Index(full, startMarker)
+				secondIdx := strings.Index(full[firstIdx+len(startMarker):], startMarker)
+				startIdx := firstIdx + len(startMarker) + secondIdx
+				after := full[startIdx+len(startMarker):]
+				// Skip the rest of the marker line
 				if nl := strings.Index(after, "\n"); nl >= 0 {
 					after = after[nl+1:]
 				}
-				// Check if end marker is already in this chunk
+				// Check if end marker already present
 				if endIdx := strings.Index(after, endMarker); endIdx >= 0 {
-					fmt.Fprint(w, after[:endIdx])
+					content := cleanStreamOutput(after[:endIdx])
+					if content != "" {
+						fmt.Fprint(w, content)
+					}
 					return nil
 				}
-				fmt.Fprint(w, after)
+				content := cleanStreamOutput(after)
+				if content != "" {
+					fmt.Fprint(w, content)
+				}
 				accumulated.Reset()
 			}
 			continue
 		}
 
-		// Already started — check for end marker
-		if strings.Contains(chunk, endMarker) {
-			before, _, _ := strings.Cut(chunk, endMarker)
-			if before != "" {
-				fmt.Fprint(w, before)
+		// Already started — check for end marker in accumulated
+		accumulated2 := accumulated.String()
+		if strings.Contains(accumulated2, endMarker) {
+			before, _, _ := strings.Cut(accumulated2, endMarker)
+			content := cleanStreamOutput(before)
+			if lastEndedNewline {
+				content = strings.TrimLeft(content, "\n")
+			}
+			if content != "" {
+				fmt.Fprint(w, content)
 			}
 			return nil
 		}
-		fmt.Fprint(w, chunk)
+		// Flush what we have
+		content := cleanStreamOutput(chunk)
+		if lastEndedNewline {
+			content = strings.TrimLeft(content, "\n")
+		}
+		if content != "" {
+			fmt.Fprint(w, content)
+			lastEndedNewline = strings.HasSuffix(content, "\n")
+		}
 		accumulated.Reset()
 	}
+}
+
+// cleanStreamOutput collapses consecutive blank lines into single newlines.
+func cleanStreamOutput(s string) string {
+	for strings.Contains(s, "\n\n") {
+		s = strings.ReplaceAll(s, "\n\n", "\n")
+	}
+	return s
 }
 
 // ExecBackground launches cmd via nohup in the background and returns the log path.

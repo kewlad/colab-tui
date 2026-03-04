@@ -13,7 +13,7 @@ import (
 func newExecCmd() *cobra.Command {
 	var (
 		label   string
-		stream  bool
+		noStream bool
 		bg      bool
 		timeout int
 	)
@@ -49,7 +49,7 @@ func newExecCmd() *cobra.Command {
 				return nil
 			}
 
-			if stream {
+			if !noStream {
 				return tty.ExecStream(command, os.Stdout, dur)
 			}
 
@@ -62,7 +62,7 @@ func newExecCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
-	cmd.Flags().BoolVar(&stream, "stream", false, "Stream output in real-time")
+	cmd.Flags().BoolVar(&noStream, "no-stream", false, "Buffer all output (don't stream)")
 	cmd.Flags().BoolVar(&bg, "bg", false, "Run in background")
 	cmd.Flags().IntVar(&timeout, "timeout", 300, "Timeout in seconds")
 	return cmd

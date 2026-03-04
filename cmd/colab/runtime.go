@@ -72,6 +72,9 @@ func newStartCmd() *cobra.Command {
 			} else if tpu {
 				variant = "TPU"
 			}
+			if gpu && accelerator == "" {
+				accelerator = "T4"
+			}
 			shape := ""
 			if highmem {
 				shape = "hm"
@@ -122,6 +125,15 @@ func newStartCmd() *cobra.Command {
 			fmt.Printf("  Accelerator: %s\n", info.Accelerator)
 			fmt.Printf("  Base URL:    %s\n", info.BaseURL)
 			fmt.Printf("  Keepalive:   PID %d\n", sess.KeepalivePID)
+
+			// Create Jupyter session (notebook naming + kernel start)
+			fmt.Printf("Creating notebook session (%s.ipynb)...\n", label)
+			kernelID, err := runtime.CreateSession(info.BaseURL, info.Token, label)
+			if err != nil {
+				fmt.Printf("  Warning: session creation failed: %v\n", err)
+			} else {
+				fmt.Printf("  Kernel:      %s\n", kernelID)
+			}
 			return nil
 		},
 	}
@@ -307,6 +319,15 @@ func newResumeCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Resumed %s — new token expires in %s\n", s.Label, time.Duration(pt.ExpiresIn)*time.Second)
+
+			// Re-create session if no kernel exists
+			fmt.Printf("Ensuring notebook session (%s.ipynb)...\n", s.Label)
+			kernelID, err := runtime.CreateSession(pt.URL, pt.Token, s.Label)
+			if err != nil {
+				fmt.Printf("  Warning: session creation failed: %v\n", err)
+			} else {
+				fmt.Printf("  Kernel: %s\n", kernelID)
+			}
 			return nil
 		},
 	}

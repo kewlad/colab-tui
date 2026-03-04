@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -257,4 +258,59 @@ func (k *Kernel) getStatusHTTP() (string, error) {
 // Close closes the underlying WebSocket connection.
 func (k *Kernel) Close() error {
 	return k.conn.Close()
+}
+
+// CreateSession creates a Jupyter session on the runtime, which starts a kernel
+// and registers the notebook name with Colab. This makes the runtime show
+// "label.ipynb" on the Colab website instead of "Unknown notebook".
+func CreateSession(baseURL, token, label string) (kernelID string, err error) {
+	sessionURL := strings.TrimRight(baseURL, "/") + "/api/sessions"
+
+	body := map[string]interface{}{
+		"name": label + ".ipynb",
+		"path": label + ".ipynb",
+		"type": "notebook",
+		"kernel": map[string]string{
+			"name": "python3",
+		},
+	}
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("marshal session body: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", sessionURL, bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("create session request: %w", err)
+	}
+	req.Header.Set(config.HProxyToken, token)
+	req.Header.Set(config.HAgent, config.HAgentVal)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("create session: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read session response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("create session failed (%d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Kernel struct {
+			ID string `json:"id"`
+		} `json:"kernel"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse session response: %w", err)
+	}
+
+	return result.Kernel.ID, nil
 }

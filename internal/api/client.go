@@ -151,7 +151,10 @@ func (c *Client) Assign(ctx context.Context, variant, accelerator, shape string)
 	if variant == "" {
 		variant = "DEFAULT"
 	}
-	path := config.TunBase + "/assign?nbh=" + nbh + "&variant=" + variant
+	path := config.TunBase + "/assign?nbh=" + nbh
+	if variant != "DEFAULT" {
+		path += "&variant=" + variant
+	}
 	if accelerator != "" {
 		path += "&accelerator=" + accelerator
 	}
