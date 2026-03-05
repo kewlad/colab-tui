@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -98,7 +99,17 @@ func newPythonCmd() *cobra.Command {
 			} else if len(args) > 0 {
 				code = strings.Join(args, " ")
 			} else {
-				return fmt.Errorf("provide code as argument or use --file")
+				// Try reading from stdin (pipe/heredoc)
+				stat, _ := os.Stdin.Stat()
+				if (stat.Mode() & os.ModeCharDevice) == 0 {
+					data, err := io.ReadAll(os.Stdin)
+					if err != nil {
+						return fmt.Errorf("read stdin: %w", err)
+					}
+					code = string(data)
+				} else {
+					return fmt.Errorf("provide code as argument, --file, or pipe via stdin")
+				}
 			}
 
 			k, err := runtime.NewKernel(s.BaseURL, s.Token)
