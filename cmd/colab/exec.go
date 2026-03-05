@@ -137,7 +137,35 @@ func newPythonCmd() *cobra.Command {
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Python file to execute")
 	cmd.Flags().BoolVar(&noStream, "no-stream", false, "Buffer all output (don't stream)")
-	cmd.Flags().IntVar(&timeout, "timeout", 300, "Timeout in seconds")
+	cmd.Flags().IntVar(&timeout, "timeout", 0, "Timeout in seconds (0 = unlimited)")
+	return cmd
+}
+
+func newAttachCmd() *cobra.Command {
+	var label string
+	cmd := &cobra.Command{
+		Use:   "attach",
+		Short: "Attach to running kernel output (reconnect to ongoing execution)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, store, err := loadAuthAndStore()
+			if err != nil {
+				return err
+			}
+			s, err := resolveSession(store, label)
+			if err != nil {
+				return err
+			}
+
+			k, err := runtime.NewKernelAttach(s.BaseURL, s.Token)
+			if err != nil {
+				return fmt.Errorf("connect kernel: %w", err)
+			}
+			defer k.Close()
+
+			return k.Attach(os.Stdout)
+		},
+	}
+	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
 	return cmd
 }
 

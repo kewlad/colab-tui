@@ -91,6 +91,28 @@ func NewKernel(baseURL, token string) (*Kernel, error) {
 	return k, nil
 }
 
+// NewKernelAttach connects to the kernel WebSocket without the kernel_info
+// handshake. Use this to attach to a busy kernel's IOPub stream.
+func NewKernelAttach(baseURL, token string) (*Kernel, error) {
+	kernelID, err := fetchFirstKernelID(baseURL, token)
+	if err != nil {
+		return nil, fmt.Errorf("no kernels: %w", err)
+	}
+
+	sessionID := uuid.NewString()
+	wsURL := toWS(baseURL) + "/api/kernels/" + kernelID + "/channels?session_id=" + sessionID
+	hdr := http.Header{}
+	hdr.Set(config.HProxyToken, token)
+	hdr.Set(config.HAgent, config.HAgentVal)
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	if err != nil {
+		return nil, fmt.Errorf("kernel dial: %w", err)
+	}
+
+	return &Kernel{conn: conn, kernelID: kernelID, sessionID: sessionID, baseURL: baseURL, token: token}, nil
+}
+
 func fetchFirstKernelID(baseURL, token string) (string, error) {
 	url := strings.TrimRight(baseURL, "/") + "/api/kernels"
 	req, err := http.NewRequest("GET", url, nil)
@@ -199,8 +221,11 @@ func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
 	}
 
 	var outputParts []string
-	deadline := time.Now().Add(timeout)
-	k.conn.SetReadDeadline(deadline)
+	if timeout > 0 {
+		k.conn.SetReadDeadline(time.Now().Add(timeout))
+	} else {
+		k.conn.SetReadDeadline(time.Time{}) // no deadline
+	}
 
 	for {
 		var resp map[string]interface{}
@@ -236,10 +261,6 @@ func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
 			// Done collecting output.
 			return strings.Join(outputParts, ""), nil
 		}
-
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("kernel execute timeout")
-		}
 	}
 }
 
@@ -271,8 +292,11 @@ func (k *Kernel) ExecuteStream(code string, w io.Writer, timeout time.Duration) 
 		return fmt.Errorf("kernel execute write: %w", err)
 	}
 
-	deadline := time.Now().Add(timeout)
-	k.conn.SetReadDeadline(deadline)
+	if timeout > 0 {
+		k.conn.SetReadDeadline(time.Now().Add(timeout))
+	} else {
+		k.conn.SetReadDeadline(time.Time{}) // no deadline
+	}
 
 	for {
 		var resp map[string]interface{}
@@ -315,9 +339,57 @@ func (k *Kernel) ExecuteStream(code string, w io.Writer, timeout time.Duration) 
 		case "execute_reply":
 			return nil
 		}
+	}
+}
 
-		if time.Now().After(deadline) {
-			return fmt.Errorf("kernel execute timeout")
+// Attach connects to the kernel and streams all IOPub output from any running
+// execution. It does not send an execute_request — it just listens.
+// Returns nil when the kernel goes idle (execution finished), or on error.
+func (k *Kernel) Attach(w io.Writer) error {
+	k.conn.SetReadDeadline(time.Time{}) // no deadline
+
+	for {
+		var resp map[string]interface{}
+		if err := k.conn.ReadJSON(&resp); err != nil {
+			return fmt.Errorf("attach read: %w", err)
+		}
+
+		if k.handleColabRequest(resp) {
+			continue
+		}
+
+		hdr, _ := resp["header"].(map[string]interface{})
+		msgType, _ := hdr["msg_type"].(string)
+		content, _ := resp["content"].(map[string]interface{})
+
+		switch msgType {
+		case "stream":
+			if text, ok := content["text"].(string); ok {
+				fmt.Fprint(w, text)
+			}
+		case "execute_result":
+			if data, ok := content["data"].(map[string]interface{}); ok {
+				if text, ok := data["text/plain"].(string); ok {
+					fmt.Fprintln(w, text)
+				}
+			}
+		case "error":
+			if tb, ok := content["traceback"].([]interface{}); ok {
+				for _, line := range tb {
+					if s, ok := line.(string); ok {
+						fmt.Fprintln(w, s)
+					}
+				}
+			}
+			ename, _ := content["ename"].(string)
+			evalue, _ := content["evalue"].(string)
+			return fmt.Errorf("kernel error %s: %s", ename, evalue)
+		case "execute_reply":
+			return nil
+		case "status":
+			if state, ok := content["execution_state"].(string); ok && state == "idle" {
+				return nil
+			}
 		}
 	}
 }

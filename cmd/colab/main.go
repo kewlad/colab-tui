@@ -29,6 +29,7 @@ func main() {
 		newResumeCmd(),
 		newExecCmd(),
 		newPythonCmd(),
+		newAttachCmd(),
 		newPsCmd(),
 		newLogsCmd(),
 		newKeepaliveCmd(),
