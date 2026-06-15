@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"math/rand"
@@ -11,6 +12,18 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/netanelbi/colab-tui/internal/config"
 )
+
+// wrapCommand builds the tty input line for a synchronous Exec/ExecStream.
+// The user command is base64-encoded and run inside its OWN bash subshell so
+// that (a) no shell quoting/escaping of cmd is needed and (b) the user command
+// aborting — via `set -e`, a non-zero exit, or `exit` — cannot prevent the
+// trailing end-marker echo from running. Without this isolation, a command that
+// exits the shell never emits the end marker and the reader blocks until the
+// full timeout (the "hangs at the end even though the work finished" failure).
+func wrapCommand(startMarker, cmd, endMarker string) string {
+	enc := base64.StdEncoding.EncodeToString([]byte(cmd))
+	return fmt.Sprintf("echo %s; bash -c \"$(echo %s | base64 -d)\"; echo %s\n", startMarker, enc, endMarker)
+}
 
 // TTY holds a WebSocket connection to the Colab TTY endpoint.
 type TTY struct {
@@ -73,8 +86,8 @@ func (t *TTY) Exec(cmd string, timeout time.Duration) (string, error) {
 	startMarker := "START_" + id
 	endMarker := "END_" + id
 
-	// Echo start marker, run command, echo end marker — all as one payload.
-	payload := ttyMsg{Data: fmt.Sprintf("echo %s; %s; echo %s\n", startMarker, cmd, endMarker)}
+	// Echo start marker, run command (isolated subshell), echo end marker — one payload.
+	payload := ttyMsg{Data: wrapCommand(startMarker, cmd, endMarker)}
 	if err := t.conn.WriteJSON(payload); err != nil {
 		return "", fmt.Errorf("tty exec write: %w", err)
 	}
@@ -146,7 +159,7 @@ func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
 	startMarker := "START_" + id
 	endMarker := "END_" + id
 
-	payload := ttyMsg{Data: fmt.Sprintf("echo %s; %s; echo %s\n", startMarker, cmd, endMarker)}
+	payload := ttyMsg{Data: wrapCommand(startMarker, cmd, endMarker)}
 	if err := t.conn.WriteJSON(payload); err != nil {
 		return fmt.Errorf("tty stream write: %w", err)
 	}

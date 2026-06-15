@@ -34,6 +34,8 @@ func main() {
 		newLogsCmd(),
 		newKeepaliveCmd(),
 		newDriveCmd(),
+		newRcloneCmd(),
+		newCpCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

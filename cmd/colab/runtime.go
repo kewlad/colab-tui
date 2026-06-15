@@ -49,12 +49,13 @@ func resolveSession(store *session.Store, label string) (*session.Session, error
 
 func newStartCmd() *cobra.Command {
 	var (
-		gpu         bool
-		tpu         bool
-		highmem     bool
-		accelerator string
-		label       string
-		gdrive      bool
+		gpu          bool
+		tpu          bool
+		highmem      bool
+		accelerator  string
+		label        string
+		gdrive       bool
+		rcloneRemote string
 	)
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -142,6 +143,12 @@ func newStartCmd() *cobra.Command {
 					fmt.Printf("Warning: Drive mount failed: %v\n", err)
 				}
 			}
+			if rcloneRemote != "" {
+				fmt.Println()
+				if err := setupRcloneRemote(info.BaseURL, info.Token, rcloneRemote); err != nil {
+					fmt.Printf("Warning: rclone setup failed: %v\n", err)
+				}
+			}
 			return nil
 		},
 	}
@@ -151,6 +158,7 @@ func newStartCmd() *cobra.Command {
 	cmd.Flags().StringVar(&accelerator, "accelerator", "", "Accelerator type (e.g. T4, A100, L4)")
 	cmd.Flags().StringVar(&label, "label", "", "Label for this runtime")
 	cmd.Flags().BoolVar(&gdrive, "gdrive", false, "Mount Google Drive after starting")
+	cmd.Flags().StringVar(&rcloneRemote, "rclone", "", "Headless: install rclone + push this local rclone remote (no consent browser)")
 	return cmd
 }
 
