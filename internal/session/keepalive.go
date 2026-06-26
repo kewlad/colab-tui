@@ -14,6 +14,7 @@ import (
 	"github.com/netanelbi/colab-tui/internal/api"
 	"github.com/netanelbi/colab-tui/internal/auth"
 	"github.com/netanelbi/colab-tui/internal/config"
+	"github.com/netanelbi/colab-tui/internal/runtime"
 )
 
 // tokenRefreshBuffer is how long before token expiry we should refresh.
@@ -68,23 +69,24 @@ func IsKeepaliveRunning(endpoint string) bool {
 
 // refreshProxyTokenIfNeeded checks the session's token expiry and refreshes
 // the proxy token if it's within tokenRefreshBuffer of expiring. It updates
-// the session store on disk so other commands pick up the new token.
-func refreshProxyTokenIfNeeded(ctx context.Context, client *api.Client, store *Store, endpoint string) {
+// the session store on disk so other commands pick up the new token. Returns
+// true if the token was refreshed (so the caller can reconnect held sockets).
+func refreshProxyTokenIfNeeded(ctx context.Context, client *api.Client, store *Store, endpoint string) bool {
 	sess := findByEndpoint(store, endpoint)
 	if sess == nil {
-		return
+		return false
 	}
 
 	ttl := time.Until(sess.TokenExpiry)
 	if ttl > tokenRefreshBuffer {
-		return
+		return false
 	}
 
 	log.Printf("keepalive: proxy token expires in %s, refreshing...", ttl.Round(time.Second))
 	pt, err := client.RefreshProxyToken(ctx, endpoint)
 	if err != nil {
 		log.Printf("keepalive: proxy token refresh failed: %v", err)
-		return
+		return false
 	}
 
 	sess.Token = pt.Token
@@ -96,6 +98,7 @@ func refreshProxyTokenIfNeeded(ctx context.Context, client *api.Client, store *S
 	} else {
 		log.Printf("keepalive: proxy token refreshed, expires in %ds", pt.ExpiresIn)
 	}
+	return true
 }
 
 // findByEndpoint returns the session matching the given endpoint.
@@ -108,9 +111,13 @@ func findByEndpoint(store *Store, endpoint string) *Session {
 	return nil
 }
 
-// RunKeepalive is a long-lived loop that pings the Colab runtime every
-// KeepaliveInterval seconds and refreshes the proxy token before it expires.
-// It writes its PID on startup and removes it on exit.
+// RunKeepalive is a long-lived loop that keeps a Colab runtime alive the way the
+// VS Code extension does: it HOLDS A KERNEL WEBSOCKET CONNECTION OPEN (so the
+// runtime always sees an attached client — "kernel connections > 0"), pings that
+// connection every HeartbeatInterval to register activity, sends the HTTP
+// keep-alive every KeepaliveInterval, and refreshes the proxy token before it
+// expires (reconnecting the held connection with the new token). It writes its
+// PID on startup and removes it on exit.
 func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) error {
 	if err := WritePID(endpoint); err != nil {
 		return fmt.Errorf("write PID: %w", err)
@@ -119,14 +126,54 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 
 	client := api.NewClient(authMgr)
 
-	// Load session store for proxy token refresh
 	store := NewStore(config.SessionsFile())
 	if err := store.Load(); err != nil {
 		log.Printf("keepalive: warning: could not load session store: %v", err)
 	}
 
-	ticker := time.NewTicker(time.Duration(config.KeepaliveInterval) * time.Second)
-	defer ticker.Stop()
+	// held is the persistent kernel connection; nil means disconnected (a
+	// reconnect is attempted on the next heartbeat tick).
+	var held *runtime.KeepaliveConn
+	defer func() {
+		if held != nil {
+			held.Close()
+		}
+	}()
+
+	// connect (re)opens the held connection using the session's current token.
+	connect := func() {
+		if held != nil {
+			held.Close()
+			held = nil
+		}
+		sess := findByEndpoint(store, endpoint)
+		if sess == nil {
+			return
+		}
+		kc, err := runtime.DialKeepalive(sess.BaseURL, sess.Token)
+		if err != nil {
+			log.Printf("keepalive: hold-connection dial failed: %v", err)
+			return
+		}
+		held = kc
+		log.Printf("keepalive: holding kernel connection for %s", endpoint)
+	}
+
+	// deadCh returns the held connection's Dead channel, or nil (blocks forever
+	// in select) when disconnected.
+	deadCh := func() <-chan struct{} {
+		if held == nil {
+			return nil
+		}
+		return held.Dead()
+	}
+
+	connect()
+
+	heartbeat := time.NewTicker(time.Duration(config.HeartbeatInterval) * time.Second)
+	defer heartbeat.Stop()
+	ping := time.NewTicker(time.Duration(config.KeepaliveInterval) * time.Second)
+	defer ping.Stop()
 
 	log.Printf("keepalive: started for endpoint %s (pid %d)", endpoint, os.Getpid())
 
@@ -135,16 +182,31 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 		case <-ctx.Done():
 			log.Printf("keepalive: stopping for endpoint %s", endpoint)
 			return nil
-		case <-ticker.C:
-			if err := client.SendKeepalive(ctx, endpoint); err != nil {
-				log.Printf("keepalive: error for endpoint %s: %v", endpoint, err)
-			} else {
-				log.Printf("keepalive: pinged endpoint %s", endpoint)
+
+		case <-deadCh():
+			log.Printf("keepalive: held connection dropped, reconnecting")
+			held = nil
+			connect()
+
+		case <-heartbeat.C:
+			if held == nil {
+				connect()
+			} else if err := held.Ping(); err != nil {
+				log.Printf("keepalive: heartbeat ping failed: %v", err)
+				held.Close()
+				held = nil
 			}
 
-			// Reload store to get latest state, then refresh token if needed
+		case <-ping.C:
+			if err := client.SendKeepalive(ctx, endpoint); err != nil {
+				log.Printf("keepalive: HTTP keep-alive error for %s: %v", endpoint, err)
+			}
+			// Reload store, refresh the token if needed, and reconnect the held
+			// connection with the fresh token if it changed.
 			if err := store.Load(); err == nil {
-				refreshProxyTokenIfNeeded(ctx, client, store, endpoint)
+				if refreshProxyTokenIfNeeded(ctx, client, store, endpoint) {
+					connect()
+				}
 			}
 		}
 	}

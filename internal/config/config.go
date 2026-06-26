@@ -15,7 +15,8 @@ const (
 	AuthURL      = "https://accounts.google.com/o/oauth2/v2/auth"
 
 	TunBase           = "/tun/m"
-	KeepaliveInterval = 300 // seconds
+	KeepaliveInterval = 300 // seconds — HTTP /keep-alive ping + token-refresh cadence
+	HeartbeatInterval = 90  // seconds — WS ping on the held kernel connection
 
 	HProxyToken = "X-Colab-Runtime-Proxy-Token"
 	HXsrf       = "X-Goog-Colab-Token"
