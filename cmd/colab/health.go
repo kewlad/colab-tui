@@ -30,17 +30,20 @@ func writeRuntimeSentinel(baseURL, token, endpoint string) {
 	_, _ = k.Execute(code, 30*time.Second)
 }
 
-// healthProbe is the single cell run on the runtime to gather liveness signals.
-const healthProbe = `import os, socket, subprocess
+// healthProbeCode is the single cell run on the runtime to gather liveness
+// signals. The sentinel path is injected as a Python string literal (%q).
+func healthProbeCode() string {
+	return fmt.Sprintf(`import os, socket, subprocess
 print("HOST", socket.gethostname())
-print("SENTINEL", os.path.exists(` + "`" + sentinelPath + "`" + `))
+print("SENTINEL", os.path.exists(%q))
 print("CONTENTN", len(os.listdir("/content")) if os.path.isdir("/content") else -1)
 try:
     g = subprocess.run(["nvidia-smi","--query-gpu=name,memory.used,memory.total","--format=csv,noheader"],
                        capture_output=True, text=True, timeout=10).stdout.strip()
 except Exception:
     g = "(no GPU)"
-print("GPU", g or "(no GPU)")`
+print("GPU", g or "(no GPU)")`, sentinelPath)
+}
 
 func newHealthCmd() *cobra.Command {
 	var label string
@@ -114,7 +117,7 @@ colab_kernel'.`,
 				return nil
 			}
 			defer k.Close()
-			out, err := k.Execute(healthProbe, 30*time.Second)
+			out, err := k.Execute(healthProbeCode(), 30*time.Second)
 			if err != nil {
 				fmt.Printf("Probe:       %v\n", err)
 				return nil
@@ -124,12 +127,13 @@ colab_kernel'.`,
 			fmt.Printf("GPU:         %s\n", p["GPU"])
 			fmt.Printf("/content:    %s files\n", p["CONTENTN"])
 
-			reaped := p["SENTINEL"] == "False"
 			fmt.Println()
-			if reaped {
-				fmt.Printf("VERDICT: REAPED — the /content sentinel is gone, so this is a FRESH VM\n")
-				fmt.Printf("behind the same endpoint; everything under /content was wiped. Re-stage\n")
-				fmt.Printf("inputs and resume from your gdrive checkpoint.\n")
+			if p["SENTINEL"] == "False" {
+				// Missing sentinel = either a reaped/recycled VM, or a runtime
+				// started before sentinel tracking — can't be sure which.
+				fmt.Printf("VERDICT: ⚠ no /content sentinel — either REAPED (fresh VM, files wiped)\n")
+				fmt.Printf("or started before sentinel tracking. /content has %s files; if those aren't\n", p["CONTENTN"])
+				fmt.Printf("yours, it was reaped — re-stage inputs / resume from your gdrive checkpoint.\n")
 			} else if state == "busy" {
 				fmt.Printf("VERDICT: ALIVE & BUSY — a cell is running (this is what keeps it alive).\n")
 				fmt.Printf("A new `colab python` will QUEUE behind it; monitor via `colab exec`/logs.\n")

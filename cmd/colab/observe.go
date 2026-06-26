@@ -17,7 +17,7 @@ func newQuotaCmd() *cobra.Command {
 		Use:   "quota",
 		Short: "Show compute-unit balance, burn rate, and free-tier quota",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			authMgr, _, err := loadAuthAndStore()
+			authMgr, store, err := loadAuthAndStore()
 			if err != nil {
 				return err
 			}
@@ -41,7 +41,7 @@ func newQuotaCmd() *cobra.Command {
 
 			fmt.Printf("Tier:          %s\n", tier)
 			fmt.Printf("Paid units:    %.2f CCU\n", c.PaidComputeUnits)
-			fmt.Printf("Burn rate:     %.2f CCU/hr (%d runtime(s) assigned)\n", c.ConsumptionRateHr, c.AssignmentsCount)
+			fmt.Printf("Burn rate:     %.2f CCU/hr (total, across %d runtime(s))\n", c.ConsumptionRateHr, c.AssignmentsCount)
 			if c.ConsumptionRateHr > 0 && c.PaidComputeUnits > 0 {
 				hrs := c.PaidComputeUnits / c.ConsumptionRateHr
 				fmt.Printf("Runway:        ~%.1f h at current rate\n", hrs)
@@ -55,6 +55,24 @@ func newQuotaCmd() *cobra.Command {
 					t := time.Unix(c.FreeCcuQuota.NextRefillTimeSec, 0)
 					fmt.Printf("Next refill:   %s (in %s)\n", t.Format(time.RFC3339), time.Until(t).Round(time.Minute))
 				}
+			}
+
+			// The consumption endpoint only gives the AGGREGATE rate, so attribute
+			// it to the machines actually assigned (label from the local file).
+			if assignments, aerr := client.ListAssignments(context.Background()); aerr == nil && len(assignments) > 0 {
+				labelByEndpoint := map[string]string{}
+				for _, s := range store.List() {
+					labelByEndpoint[s.Endpoint] = s.Label
+				}
+				fmt.Printf("\nAssigned runtimes (each burning its accelerator's rate):\n")
+				for _, a := range assignments {
+					label := labelByEndpoint[a.Endpoint]
+					if label == "" {
+						label = "(untracked)"
+					}
+					fmt.Printf("  - %-12s %s %s %s  %s\n", label, a.Variant, a.Accelerator, a.MachineShape, a.Endpoint)
+				}
+				fmt.Printf("Tip: `colab stop <label>` an idle runtime to cut the burn; `colab resources <label>` to see if it's working.\n")
 			}
 			return nil
 		},
