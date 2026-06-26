@@ -50,7 +50,9 @@ func newExecCmd() *cobra.Command {
 				// rather than guessing the most-recent file on the box.
 				s.BgLogPath = logPath
 				_ = store.Save()
-				fmt.Printf("Background command started. Log: %s\n", logPath)
+				fmt.Fprintln(os.Stderr, "[note] --bg runs outside the kernel — fine for short/medium work, but a job "+
+					"outliving the idle-reap (~2.5h) is killed. For long jobs use: colab python --detach (reap-safe).")
+				fmt.Printf("Background command started. Log: %s  (tail it: colab logs --label %s)\n", logPath, s.Label)
 				return nil
 			}
 
@@ -71,8 +73,8 @@ func newExecCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
-	cmd.Flags().BoolVar(&bg, "bg", false, "Run in background")
-	cmd.Flags().BoolVar(&kernelMode, "kernel", false, "Run via the Jupyter kernel instead of the TTY (robust if the terminal wedges)")
+	cmd.Flags().BoolVar(&bg, "bg", false, "Run detached via nohup, OUTSIDE the kernel (not reap-safe past ~2.5h; for long jobs use 'python --detach')")
+	cmd.Flags().BoolVar(&kernelMode, "kernel", false, "Force the Jupyter kernel channel instead of the TTY (deterministic robust path; plain exec already auto-falls-back)")
 	cmd.Flags().IntVar(&timeout, "timeout", 300, "Timeout in seconds")
 	return cmd
 }
@@ -87,8 +89,24 @@ func newPythonCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "python CODE",
-		Short: "Execute Python code in the Jupyter kernel",
+		Short: "Execute Python CODE in the kernel (this is NOT the python CLI)",
+		Long: `Executes Python CODE inside the runtime's Jupyter kernel — it is NOT the python
+executable, so there are no python-CLI args. Common mix-ups:
+
+  colab python 'import torch; print(torch.cuda.is_available())'   # ✅ code
+  colab python -f train.py                                        # ✅ run a local .py file
+  colab exec 'pip install ultralytics'                            # ✅ pip / shell → use exec
+  colab python -m pip install x   /   colab python pip install x  # ❌ that's the shell, use exec
+
+A busy kernel keeps the runtime alive; --detach fires a long cell and returns.`,
+		// A python-CLI-style invocation (e.g. 'python -m pip') trips flag parsing —
+		// redirect the agent to the right command instead of a bare "unknown flag".
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				if h := pythonMisuseHint(strings.Join(args, " ")); h != "" {
+					fmt.Fprintln(os.Stderr, h)
+				}
+			}
 			_, store, err := loadAuthAndStore()
 			if err != nil {
 				return err
@@ -157,11 +175,39 @@ func newPythonCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
-	cmd.Flags().StringVarP(&file, "file", "f", "", "Python file to execute")
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Run a local Python file instead of inline CODE")
 	cmd.Flags().BoolVar(&noStream, "no-stream", false, "Buffer all output (don't stream)")
-	cmd.Flags().BoolVar(&detach, "detach", false, "Submit cell and return immediately; kernel keeps running it (keeps runtime alive for long tasks)")
+	cmd.Flags().BoolVar(&detach, "detach", false, "Fire the cell and return; the kernel keeps running it (reap-safe way to launch a long job)")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "Timeout in seconds (0 = unlimited)")
+	// Turn a python-CLI-style flag (e.g. 'python -m pip') into a helpful redirect.
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return fmt.Errorf("%w\n`colab python` runs Python CODE in the kernel, not the python CLI. "+
+			"For pip/shell use:  colab exec 'pip install ...'  •  to pass code:  colab python 'print(1)'", err)
+	})
 	return cmd
+}
+
+// pythonMisuseHint returns a redirect hint when CODE looks like a shell/CLI
+// command (the recurring "treated colab python as the python binary" mistake),
+// or "" if it looks like real Python. Non-blocking — the caller still runs it.
+func pythonMisuseHint(code string) string {
+	fields := strings.Fields(strings.TrimSpace(code))
+	if len(fields) == 0 {
+		return ""
+	}
+	shell := map[string]bool{
+		"pip": true, "pip3": true, "python": true, "python3": true, "apt": true,
+		"apt-get": true, "conda": true, "sudo": true, "cd": true, "ls": true,
+		"mkdir": true, "rm": true, "wget": true, "curl": true, "git": true,
+		"nvidia-smi": true, "bash": true, "sh": true, "export": true, "source": true,
+	}
+	if shell[fields[0]] {
+		return fmt.Sprintf("hint: `colab python` runs Python CODE in the kernel, not the shell. For that command use:\n      colab exec %q", strings.TrimSpace(code))
+	}
+	if len(fields) == 1 && strings.HasSuffix(fields[0], ".py") {
+		return fmt.Sprintf("hint: `colab python` takes CODE, not a filename. To run a local file:  colab python -f %s", fields[0])
+	}
+	return ""
 }
 
 func newAttachCmd() *cobra.Command {

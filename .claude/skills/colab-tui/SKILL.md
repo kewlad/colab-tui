@@ -60,14 +60,18 @@ or positional `[LABEL]` on `health`/`status`/`restart`/`stop`). Mutating command
 
 ## Running code
 
+**`colab python` runs Python CODE in the kernel — it is NOT the `python` binary.** No CLI args:
+`pip install …`, `python -m …`, or a bare `script.py` are **shell**, so use `colab exec` (or `python -f file`).
+The tool will redirect you if you slip.
+
 | Need | Use |
 |------|-----|
 | Run a cell, see output | `colab python "<code>"` — reliable, keeps kernel busy |
 | Long job, don't block the turn | synchronous `colab python` under the Bash tool's `run_in_background:true` |
-| Fire-and-disconnect a long job | `colab python --detach` — returns once the kernel confirms it started the cell |
-| Big / multi-statement code | stage a file (`fs put`/`cp`) → `colab python -f` or `subprocess` in a cell (inline args >~10 KB jam the kernel) |
-| A bash one-liner | `colab exec "<cmd>"` (TTY), or `--kernel` if the TTY wedges |
-| Shell job under 2.5 h | `colab exec --bg "… > run.log 2>&1 &"` → poll `colab logs` |
+| Fire-and-disconnect a long job | `colab python --detach` — reap-safe (kernel stays busy); returns once it confirms start |
+| Big / multi-statement code | stage a file (`fs put`/`cp`) → `colab python -f` (inline args >~10 KB jam the kernel) |
+| pip / shell command | `colab exec "pip install …"` (TTY; `--kernel` forces the robust channel) |
+| Detached shell job | `colab exec --bg "…" ` → `colab logs`. ⚠ outside the kernel → **reaped past ~2.5 h**; for long jobs use `python --detach` |
 
 **Don't queue cells:** a second `colab python` blocks behind a busy cell. Monitor via a separate channel —
 `colab exec "tail …"` (TTY is independent of the kernel) or, better, local `rclone` on gdrive checkpoints.
