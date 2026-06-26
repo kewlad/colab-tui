@@ -65,4 +65,20 @@ To re-audit against a newer extension: clone `googlecolab/colab-vscode`, diff
 
 ---
 
+## 2026-06-27 — fs command, multi-runtime targeting, keepalive self-cleans
+
+- **`colab fs ls/cat/get/put/rm`** — direct runtime filesystem over the Jupyter Contents API (no rclone,
+  no Drive consent). Byte-exact (live-verified text + binary roundtrips on a CPU session). Use for small
+  files/edits; `colab cp` (rclone) still preferred for bulk/single-network.
+- **Targeting safety**: with >1 runtime assigned, commands now REFUSE to guess (error lists the labels) —
+  pass `--label`/positional `[LABEL]`. Single runtime stays zero-friction. Mutating commands echo
+  `[label]` to stderr; `fs put/get/rm` name the machine. Live-verified with two CPU sessions.
+- **Keepalive stops dead sessions**: each 5-min ping re-lists assignments (VS Code per-cycle parity) and,
+  if the endpoint is no longer assigned, removes the orphaned session + exits — no more pinging a dead
+  runtime forever (the old `ltx` daemon did exactly that via the dead old host). Deliberate diff from VS
+  Code: we do NOT idle-tombstone after 1h (agents want the runtime held across idle gaps).
+- Full CPU-session test matrix passed: start/health/status/resources/quota/list/exec(TTY+kernel)/
+  exec --bg+logs/python/--detach/restart/fs(all)/stop. NOT waited out: the 5-min daemon self-clean cycle
+  end-to-end (building blocks verified).
+
 <!-- Append new dated entries above this line. -->
