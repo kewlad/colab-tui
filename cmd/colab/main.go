@@ -32,6 +32,7 @@ func main() {
 		newListCmd(),
 		newStatusCmd(),
 		newRestartCmd(),
+		newInterruptCmd(),
 		newResumeCmd(),
 		newExecCmd(),
 		newPythonCmd(),

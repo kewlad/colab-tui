@@ -414,6 +414,33 @@ func (k *Kernel) Attach(w io.Writer) error {
 	}
 }
 
+// InterruptKernel sends an interrupt (→ KeyboardInterrupt) to the runtime's first
+// kernel, stopping the currently-running cell WITHOUT restarting the kernel — so
+// imports/variables survive (unlike Restart). No WebSocket needed.
+func InterruptKernel(baseURL, token string) error {
+	id, _, err := FirstKernelState(baseURL, token)
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(baseURL, "/") + "/api/kernels/" + id + "/interrupt"
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(config.HProxyToken, token)
+	req.Header.Set(config.HAgent, config.HAgentVal)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("interrupt: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("interrupt failed (%d): %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 // GetStatus returns the execution_state of the kernel (busy / idle / starting).
 func (k *Kernel) GetStatus() (string, error) {
 	var info kernelInfo

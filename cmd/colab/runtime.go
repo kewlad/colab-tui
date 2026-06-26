@@ -460,6 +460,39 @@ func newRestartCmd() *cobra.Command {
 	}
 }
 
+func newInterruptCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "interrupt [LABEL]",
+		Short: "Interrupt the running cell (KeyboardInterrupt), keeping the kernel + variables",
+		Long: `Sends an interrupt to the running cell — like pressing Ctrl-C in a notebook.
+The cell stops with KeyboardInterrupt but the kernel keeps running (imports and
+variables survive), unlike 'colab restart' which tears the kernel down. (Ctrl-C in
+'colab watch --stream'/'colab attach' only detaches the viewer; the cell keeps
+running — use this to actually stop it.)`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, store, err := loadAuthAndStore()
+			if err != nil {
+				return err
+			}
+			label := ""
+			if len(args) > 0 {
+				label = args[0]
+			}
+			s, err := resolveSession(store, label)
+			if err != nil {
+				return err
+			}
+			echoTarget(s.Label)
+			if err := runtime.InterruptKernel(s.BaseURL, s.Token); err != nil {
+				return err
+			}
+			fmt.Println("Interrupt sent — the running cell should stop (kernel and variables preserved).")
+			return nil
+		},
+	}
+}
+
 func newKeepaliveCmd() *cobra.Command {
 	var endpoint string
 	cmd := &cobra.Command{
