@@ -14,7 +14,6 @@ import (
 func newExecCmd() *cobra.Command {
 	var (
 		label      string
-		noStream   bool
 		bg         bool
 		timeout    int
 		kernelMode bool
@@ -46,6 +45,10 @@ func newExecCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				// Persist the log path so `colab logs` tails THIS job's output
+				// rather than guessing the most-recent file on the box.
+				s.BgLogPath = logPath
+				_ = store.Save()
 				fmt.Printf("Background command started. Log: %s\n", logPath)
 				return nil
 			}
@@ -67,7 +70,6 @@ func newExecCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
-	cmd.Flags().BoolVar(&noStream, "no-stream", false, "Buffer all output (don't stream)")
 	cmd.Flags().BoolVar(&bg, "bg", false, "Run in background")
 	cmd.Flags().BoolVar(&kernelMode, "kernel", false, "Run via the Jupyter kernel instead of the TTY (robust if the terminal wedges)")
 	cmd.Flags().IntVar(&timeout, "timeout", 300, "Timeout in seconds")
@@ -243,11 +245,17 @@ func newLogsCmd() *cobra.Command {
 			}
 			defer tty.Close()
 
-			logCmd := "ls -t /tmp/colab-tui/*.log 2>/dev/null | head -1 | xargs"
+			// Prefer the log path recorded by the last `exec --bg` for this
+			// session; fall back to the most-recent log on the box otherwise.
+			target := "$(ls -t /tmp/colab-tui/*.log 2>/dev/null | head -1)"
+			if s.BgLogPath != "" {
+				target = s.BgLogPath
+			}
+			var logCmd string
 			if tail > 0 {
-				logCmd += fmt.Sprintf(" tail -n %d", tail)
+				logCmd = fmt.Sprintf("tail -n %d %s", tail, target)
 			} else {
-				logCmd += " cat"
+				logCmd = "cat " + target
 			}
 
 			output, err := tty.Exec(logCmd, 30*time.Second)

@@ -129,14 +129,23 @@ func NewKernelAttach(baseURL, token string) (*Kernel, error) {
 }
 
 func fetchFirstKernelID(baseURL, token string) (string, error) {
+	id, _, err := FirstKernelState(baseURL, token)
+	return id, err
+}
+
+// FirstKernelState returns the id and execution_state (busy/idle/starting) of the
+// runtime's first kernel via the REST API, without opening a WebSocket or
+// creating a session. An error means there are no kernels — a strong signal the
+// runtime was reaped or never started one.
+func FirstKernelState(baseURL, token string) (id, state string, err error) {
 	var kernels []kernelInfo
 	if err := kernelGet(baseURL, token, "/api/kernels", &kernels); err != nil {
-		return "", fmt.Errorf("kernel list: %w", err)
+		return "", "", fmt.Errorf("kernel list: %w", err)
 	}
 	if len(kernels) == 0 {
-		return "", fmt.Errorf("no kernels available")
+		return "", "", fmt.Errorf("no kernels available")
 	}
-	return kernels[0].ID, nil
+	return kernels[0].ID, kernels[0].ExecutionState, nil
 }
 
 // jupyterMsg is a simplified Jupyter wire protocol message.

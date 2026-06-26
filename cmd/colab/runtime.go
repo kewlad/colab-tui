@@ -136,6 +136,9 @@ func newStartCmd() *cobra.Command {
 			} else {
 				fmt.Printf("  Kernel:      %s\n", kernelID)
 			}
+			// Drop the reap-detection sentinel so `colab health` can tell a
+			// recycled container (fresh VM, /content wiped) from a live one.
+			writeRuntimeSentinel(info.BaseURL, info.Token, info.Endpoint)
 
 			if gdrive {
 				fmt.Println()
@@ -345,6 +348,7 @@ func newResumeCmd() *cobra.Command {
 			} else {
 				fmt.Printf("  Kernel: %s\n", kernelID)
 			}
+			writeRuntimeSentinel(pt.URL, pt.Token, s.Endpoint)
 			return nil
 		},
 	}

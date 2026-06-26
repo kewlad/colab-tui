@@ -22,6 +22,7 @@ type Session struct {
 	TokenExpiry  time.Time `json:"token_expiry"`
 	AssignedAt   time.Time `json:"assigned_at"`
 	KeepalivePID int       `json:"keepalive_pid"`
+	BgLogPath    string    `json:"bg_log_path,omitempty"` // log of the most recent `exec --bg` job
 }
 
 // Store persists sessions to a JSON file.

@@ -32,6 +32,7 @@ func main() {
 		newAttachCmd(),
 		newPsCmd(),
 		newLogsCmd(),
+		newHealthCmd(),
 		newKeepaliveCmd(),
 		newDriveCmd(),
 		newRcloneCmd(),
