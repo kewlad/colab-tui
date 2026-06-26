@@ -44,7 +44,7 @@ func NewTTY(baseURL, token string) (*TTY, error) {
 	hdr.Set(config.HProxyToken, token)
 	hdr.Set(config.HAgent, config.HAgentVal)
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	conn, err := dialWSRetry(wsURL, hdr)
 	if err != nil {
 		return nil, fmt.Errorf("tty dial: %w", err)
 	}
@@ -252,10 +252,18 @@ func cleanStreamOutput(s string) string {
 }
 
 // ExecBackground launches cmd via nohup in the background and returns the log path.
+// The user command is base64-decoded into its own script and run under `bash` (same
+// isolation as the synchronous wrapCommand path), so env-prefixes (VAR=x cmd), pipes,
+// redirects, `&&`, and `;` all work. The previous `nohup %s` form passed the command
+// straight to nohup, so `VAR=x python ...` made nohup try to exec the literal "VAR=x"
+// ("nohup: failed to run command 'VAR=x'").
 func (t *TTY) ExecBackground(cmd string) (string, error) {
 	id := randHex(6)
 	logPath := "/tmp/colab-tui/" + id + ".log"
-	wrapped := fmt.Sprintf("mkdir -p /tmp/colab-tui && nohup %s > %s 2>&1 &\n", cmd, logPath)
+	scriptPath := "/tmp/colab-tui/" + id + ".sh"
+	enc := base64.StdEncoding.EncodeToString([]byte(cmd))
+	wrapped := fmt.Sprintf("mkdir -p /tmp/colab-tui && echo %s | base64 -d > %s && nohup bash %s > %s 2>&1 &\n",
+		enc, scriptPath, scriptPath, logPath)
 	payload := ttyMsg{Data: wrapped}
 	if err := t.conn.WriteJSON(payload); err != nil {
 		return "", fmt.Errorf("tty bg write: %w", err)
@@ -266,6 +274,40 @@ func (t *TTY) ExecBackground(cmd string) (string, error) {
 // Close closes the underlying WebSocket connection.
 func (t *TTY) Close() error {
 	return t.conn.Close()
+}
+
+// dialWSRetry dials a websocket, retrying transient handshake/connection failures.
+// Colab's proxy intermittently returns "bad handshake" / closes 1006 under load or
+// right after a runtime (re)assignment; a few short backed-off retries turn those
+// spurious one-shot failures into success instead of surfacing them to the user.
+func dialWSRetry(wsURL string, hdr http.Header) (*websocket.Conn, error) {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 750 * time.Millisecond)
+		}
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if !isTransientDialErr(err) {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+// isTransientDialErr reports whether a websocket dial error is the kind that a
+// retry can plausibly recover from (vs. e.g. a 404 for a deallocated runtime).
+func isTransientDialErr(err error) bool {
+	s := err.Error()
+	for _, m := range []string{"bad handshake", "1006", "1005", "EOF", "i/o timeout", "connection reset", "connection refused"} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // toWS converts an http(s) URL to ws(s).

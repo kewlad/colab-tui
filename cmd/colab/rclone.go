@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/netanelbi/colab-tui/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -37,12 +36,6 @@ func setupRcloneRemote(baseURL, token, remote string) error {
 	if err != nil {
 		return err
 	}
-	tty, err := runtime.NewTTY(baseURL, token)
-	if err != nil {
-		return fmt.Errorf("connect TTY: %w", err)
-	}
-	defer tty.Close()
-
 	b64 := base64.StdEncoding.EncodeToString([]byte(cfg + "\n"))
 	script := fmt.Sprintf(`which rclone >/dev/null 2>&1 || (curl -s https://rclone.org/install.sh | bash >/dev/null 2>&1) || (cd /tmp && curl -sLO https://downloads.rclone.org/rclone-current-linux-amd64.zip && unzip -oq rclone-current-linux-amd64.zip && cp rclone-*-linux-amd64/rclone /usr/bin/ && chmod +x /usr/bin/rclone)
 mkdir -p ~/.config/rclone
@@ -55,12 +48,7 @@ rclone lsd %s: >/dev/null 2>&1 && echo "OK: remote '%s' reachable from the runti
 		b64, remote, remote, remote, remote)
 
 	fmt.Printf("Setting up rclone remote %q on the runtime (headless, no consent)...\n", remote)
-	out, err := tty.Exec(script, 300*time.Second)
-	if err != nil {
-		return err
-	}
-	fmt.Println(out)
-	return nil
+	return runtimeShell(baseURL, token, script, 300*time.Second, os.Stdout)
 }
 
 func newRcloneCmd() *cobra.Command {
@@ -121,11 +109,6 @@ a runtime crash can lose writes still buffered in the VFS cache.`,
 			if err != nil {
 				return err
 			}
-			tty, err := runtime.NewTTY(s.BaseURL, s.Token)
-			if err != nil {
-				return fmt.Errorf("connect TTY: %w", err)
-			}
-			defer tty.Close()
 			src := args[0]
 			if !strings.Contains(src, ":") {
 				src += ":"
@@ -134,12 +117,7 @@ a runtime crash can lose writes still buffered in the VFS cache.`,
 rclone mount %q %q --daemon --vfs-cache-mode writes --dir-cache-time 10s --allow-non-empty 2>&1
 sleep 2; mountpoint -q %q && echo "mounted %s at %s" || echo "WARN: mount may have failed"`,
 				mountpoint, src, mountpoint, mountpoint, src, mountpoint)
-			out, err := tty.Exec(script, 60*time.Second)
-			if err != nil {
-				return err
-			}
-			fmt.Println(out)
-			return nil
+			return runtimeShell(s.BaseURL, s.Token, script, 60*time.Second, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
@@ -173,13 +151,8 @@ colab start --rclone REMOTE).`,
 			if err != nil {
 				return err
 			}
-			tty, err := runtime.NewTTY(s.BaseURL, s.Token)
-			if err != nil {
-				return fmt.Errorf("connect TTY: %w", err)
-			}
-			defer tty.Close()
 			script := fmt.Sprintf(`rclone copy %q %q 2>&1 | tail -3; echo "[rclone copy exit $?]"`, args[0], args[1])
-			return tty.ExecStream(script, os.Stdout, time.Duration(timeout)*time.Second)
+			return runtimeShell(s.BaseURL, s.Token, script, time.Duration(timeout)*time.Second, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")

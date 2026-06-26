@@ -1,0 +1,19 @@
+{
+  "scope": "user",
+  "mode": "semi-auto",
+  "rules": {
+    "allow": [
+      "Bash(rg *)"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "sandbox": {
+    "enabled": true,
+    "allowWrite": [],
+    "denyWrite": [],
+    "denyRead": [],
+    "excludedCommands": []
+  },
+  "stickyApprovals": true
+}

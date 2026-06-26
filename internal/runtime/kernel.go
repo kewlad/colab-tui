@@ -46,7 +46,7 @@ func NewKernel(baseURL, token string) (*Kernel, error) {
 	hdr.Set(config.HProxyToken, token)
 	hdr.Set(config.HAgent, config.HAgentVal)
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	conn, err := dialWSRetry(wsURL, hdr)
 	if err != nil {
 		return nil, fmt.Errorf("kernel dial: %w", err)
 	}
@@ -105,7 +105,7 @@ func NewKernelAttach(baseURL, token string) (*Kernel, error) {
 	hdr.Set(config.HProxyToken, token)
 	hdr.Set(config.HAgent, config.HAgentVal)
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	conn, err := dialWSRetry(wsURL, hdr)
 	if err != nil {
 		return nil, fmt.Errorf("kernel dial: %w", err)
 	}
@@ -262,6 +262,36 @@ func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
 			return strings.Join(outputParts, ""), nil
 		}
 	}
+}
+
+// ExecuteDetach sends an execute_request and returns immediately without waiting for the reply.
+// The kernel runs the cell to completion regardless of the client connection (Jupyter semantics),
+// so this is the way to launch long-running work (e.g. training) while keeping the kernel "busy"
+// — which prevents Colab from idle-reaping the runtime. Monitor via Attach or an out-of-band log.
+func (k *Kernel) ExecuteDetach(code string) error {
+	msg := jupyterMsg{
+		Header: map[string]string{
+			"msg_id":   uuid.NewString(),
+			"msg_type": "execute_request",
+			"session":  k.sessionID,
+			"username": "",
+			"version":  "5.2",
+		},
+		ParentHeader: map[string]interface{}{},
+		Metadata:     map[string]interface{}{},
+		Content: map[string]interface{}{
+			"code":          code,
+			"silent":        false,
+			"store_history": true,
+			"allow_stdin":   false,
+			"stop_on_error": true,
+		},
+		Channel: "shell",
+	}
+	if err := k.conn.WriteJSON(msg); err != nil {
+		return fmt.Errorf("kernel execute_detach write: %w", err)
+	}
+	return nil
 }
 
 // ExecuteStream sends code to the kernel and streams output to w in real-time.
@@ -461,7 +491,7 @@ func (k *Kernel) Restart() error {
 	hdr.Set(config.HProxyToken, k.token)
 	hdr.Set(config.HAgent, config.HAgentVal)
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	conn, err := dialWSRetry(wsURL, hdr)
 	if err != nil {
 		return fmt.Errorf("kernel reconnect after restart: %w", err)
 	}
