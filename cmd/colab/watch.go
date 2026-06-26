@@ -25,10 +25,15 @@ func newWatchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "watch [LABEL]",
 		Short: "Poll a runtime's kernel/GPU state until a running job finishes (reap-safe)",
-		Long: `Heartbeat monitor for a long job. Every --interval seconds it prints the kernel
-state and GPU utilization (via REST endpoints, so it never disturbs a busy kernel
-and survives reaps) and exits when the kernel goes idle (cell finished) or the
-runtime is gone. With --log it also tails the last line of a runtime log each tick.
+		Long: `Heartbeat monitor for a RUNNING job. Every --interval seconds it prints the
+kernel state + GPU utilization (via REST endpoints, so it never disturbs a busy
+kernel and survives reaps) and exits when the kernel goes idle (cell finished) or
+the runtime is gone. On an idle runtime there's nothing to watch.
+
+  colab watch --label myrun                          # status + GPU each tick
+  colab watch --label myrun --log /content/train.log # + tail that runtime file
+  colab watch --label myrun --forever                # keep polling even when idle
+
 For a live byte-stream of the running cell's stdout, use 'colab attach' instead.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -67,6 +72,9 @@ For a live byte-stream of the running cell's stdout, use 'colab attach' instead.
 						if ll := lastLine(string(data)); ll != "" {
 							line += "  | " + ll
 						}
+					} else {
+						// Be loud, not silent — --log takes a runtime FILE PATH.
+						line += fmt.Sprintf("  | (log %q not found on runtime)", logPath)
 					}
 				}
 				fmt.Println(line)
@@ -76,7 +84,9 @@ For a live byte-stream of the running cell's stdout, use 'colab attach' instead.
 					if prevActive {
 						fmt.Printf("%s  kernel went idle — cell finished.\n", time.Now().Format("15:04:05"))
 					} else if first {
-						fmt.Println("(kernel idle — no cell running; pass --forever to keep watching)")
+						fmt.Println("kernel is idle — nothing running to watch.")
+						fmt.Println("  • live output of a running cell:  colab attach --label " + s.Label)
+						fmt.Println("  • keep polling state anyway:      colab watch --label " + s.Label + " --forever")
 					}
 					return nil
 				}
@@ -88,7 +98,7 @@ For a live byte-stream of the running cell's stdout, use 'colab attach' instead.
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
 	cmd.Flags().IntVar(&interval, "interval", 30, "Seconds between checks")
 	cmd.Flags().BoolVar(&forever, "forever", false, "Keep watching even after the kernel goes idle")
-	cmd.Flags().StringVar(&logPath, "log", "", "Also tail the last line of this runtime log file each tick")
+	cmd.Flags().StringVar(&logPath, "log", "", "Tail the last line of this file ON THE RUNTIME each tick (a path, e.g. /content/train.log)")
 	return cmd
 }
 
