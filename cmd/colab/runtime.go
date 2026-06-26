@@ -216,28 +216,67 @@ func newStopCmd() *cobra.Command {
 func newListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List active runtimes",
+		Short: "List active runtimes (reconciled with Colab's server-side assignments)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, store, err := loadAuthAndStore()
+			authMgr, store, err := loadAuthAndStore()
 			if err != nil {
 				return err
 			}
 			sessions := store.List()
-			if len(sessions) == 0 {
-				fmt.Println("No active runtimes.")
-				return nil
-			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "LABEL\tVARIANT\tACCELERATOR\tENDPOINT\tKEEPALIVE")
+
+			// Server-side truth: what Colab actually has assigned to us right now.
+			// The local file only adds the label/keepalive we can't get back.
+			client := api.NewClient(authMgr)
+			client.Verbose = verbose
+			assignments, aerr := client.ListAssignments(context.Background())
+			localByEndpoint := map[string]*session.Session{}
 			for _, s := range sessions {
-				kaStatus := "dead"
-				if session.IsKeepaliveRunning(s.Endpoint) {
-					kaStatus = fmt.Sprintf("alive (PID %d)", s.KeepalivePID)
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-					s.Label, s.Variant, s.Accelerator, s.Endpoint, kaStatus)
+				localByEndpoint[s.Endpoint] = s
 			}
-			return w.Flush()
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "LABEL\tVARIANT\tACCELERATOR\tSHAPE\tENDPOINT\tKEEPALIVE\tSERVER")
+
+			seen := map[string]bool{}
+			if aerr == nil {
+				for _, a := range assignments {
+					seen[a.Endpoint] = true
+					label, ka := "-", "-"
+					if s := localByEndpoint[a.Endpoint]; s != nil {
+						label = s.Label
+						ka = "dead"
+						if session.IsKeepaliveRunning(s.Endpoint) {
+							ka = fmt.Sprintf("alive (PID %d)", s.KeepalivePID)
+						}
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+						label, a.Variant, a.Accelerator, a.MachineShape, a.Endpoint, ka, "assigned")
+				}
+			}
+			// Local entries the server no longer lists = stale (reaped/unassigned).
+			for _, s := range sessions {
+				if seen[s.Endpoint] {
+					continue
+				}
+				srv := "STALE (not assigned)"
+				if aerr != nil {
+					srv = "?" // couldn't reach the server
+				}
+				ka := "dead"
+				if session.IsKeepaliveRunning(s.Endpoint) {
+					ka = fmt.Sprintf("alive (PID %d)", s.KeepalivePID)
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					s.Label, s.Variant, s.Accelerator, "-", s.Endpoint, ka, srv)
+			}
+			w.Flush()
+
+			if aerr != nil {
+				fmt.Fprintf(os.Stderr, "\n(server assignment check failed: %v — showing local state only)\n", aerr)
+			} else if len(assignments) == 0 && len(sessions) == 0 {
+				fmt.Println("No active runtimes.")
+			}
+			return nil
 		},
 	}
 }
