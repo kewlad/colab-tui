@@ -123,6 +123,10 @@ Other recoveries:
   the network. Pick ONE: **(a)** Colab pulls inputs from S3/GCS itself (datacenter speed — push only a
   secret + thin script + small caches), or **(b)** run **fully local**. Local fallback when Colab is
   throttled is still single-network.
+- **Small files / quick edits → `colab fs`** (direct Jupyter Contents API, no rclone, no Drive consent):
+  `colab fs ls /content`, `fs put ./x.py /content/x.py`, `fs get /content/out.csv .`, `fs cat`, `fs rm`.
+  Byte-exact (base64). For **bulk** data (videos, weights, many files) use `colab cp` instead — it streams
+  single-network straight from S3/gdrive, whereas `fs` round-trips bytes through your machine.
 - `colab cp SRC DST` = `rclone copy` on the runtime (no Drive-FUSE lag). Trailing-slash the dest dir
   (`colab cp file remote:dir/`) — without it rclone may create a *directory* named `file`.
 - **rclone of MANY SMALL FILES is Drive-throttled to a crawl** (thousands of label files stall). **Tar

@@ -39,6 +39,7 @@ func main() {
 		newDriveCmd(),
 		newRcloneCmd(),
 		newCpCmd(),
+		newFsCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
