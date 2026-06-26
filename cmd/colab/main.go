@@ -33,6 +33,8 @@ func main() {
 		newPsCmd(),
 		newLogsCmd(),
 		newHealthCmd(),
+		newQuotaCmd(),
+		newResourcesCmd(),
 		newKeepaliveCmd(),
 		newDriveCmd(),
 		newRcloneCmd(),
