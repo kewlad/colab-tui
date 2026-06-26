@@ -81,10 +81,11 @@ Reserve `colab python` for launching, never mid-run polling.
 3. **Resume-skip on relaunch** (`YOLO(last.pt).train(resume=True)`, or skip done units). A killed `--bg`
    backup loop is unreliable — use the in-process callback.
 4. Wrap each unit in try/except (a dead cell → idle → reap wipes unsaved work).
-5. **Monitor with `colab watch <label>`** — a cheap, reap-safe heartbeat (kernel state + GPU util +
-   optional `--log` tail) that exits when the cell finishes; for a live byte-stream of the cell's stdout
-   use **`colab attach`**. For fleet/gdrive-marker monitoring use ONE recurring loop (check via local
-   `rclone lsf <gdrive>/DONE`) — never N one-shot `until…;sleep` shells; they leak.
+5. **Monitor with `colab watch <label>`** — reap-safe heartbeat (kernel state + GPU util, exits when the
+   cell finishes). For the running cell's **live output** use **`colab watch --stream`** (taps kernel
+   stdout — no log file needed) or `colab attach`; to follow a logfile add `--log /content/run.log`.
+   For fleet/gdrive-marker monitoring use ONE recurring loop (check via local `rclone lsf <gdrive>/DONE`)
+   — never N one-shot `until…;sleep` shells; they leak.
 
 ## Diagnosing a stuck / dead runtime
 
@@ -93,6 +94,9 @@ Reserve `colab python` for launching, never mid-run polling.
 = crashed → `colab restart`; **running** = busy/healthy; **`/content` wiped** = real reap → `colab start`
 fresh + resume from checkpoint.
 
+- Stop a runaway/wrong job: **`colab interrupt`** (KeyboardInterrupt — stops the cell, keeps the kernel +
+  variables). `colab restart` is the harder reset (kills the kernel, frees GPU). Note: Ctrl-C in
+  `watch --stream`/`attach` only detaches the *viewer* — the cell keeps running; use `interrupt` to stop it.
 - `websocket: bad handshake`/`1006` → stale proxy: `colab resume --label X` (headless), or use `colab python`.
 - `colab start` **HTTP 412** → ~2-concurrent-GPU cap; free a slot, start sequentially (parallel `start` 412s).
 - Repeated rapid reaps on a *fresh* runtime → heavy-use **throttling**; wait it out or fall back to local.
