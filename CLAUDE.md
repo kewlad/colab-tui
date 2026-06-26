@@ -7,20 +7,28 @@ Go CLI (`colab`) that manages Google Colab runtimes without VS Code. Reverse-eng
 ## Commands
 
 ```bash
-go build -o colab ./cmd/colab   # build
-go test ./...                    # run all tests
+go test ./...                                # before and after any change
+go build -o ~/.local/bin/colab ./cmd/colab   # build straight onto PATH (overwrites the live binary)
 ```
+
+## Develop-the-tool loop (the self-improvement path)
+
+The `colab-tui` skill tells agents to fix this tool when they hit a limitation — that's how `fs`,
+`health`, `quota`, `--detach`, and the connection-holding keepalive were added. The loop:
+**read this file (esp. the protocol section below) → make a surgical change → `go test` → build onto
+PATH → verify on a live runtime → update the skill (`.claude/skills/colab-tui/SKILL.md`) if behavior
+changed.** Match existing style; don't touch the protocol layer without reading the v0.8.1 section.
 
 ## Architecture
 
 ```
-cmd/colab/          # Cobra CLI commands (main, auth, runtime, exec, drive)
+cmd/colab/          # Cobra CLI commands (main, runtime, exec, fs, observe, health, auth, drive, rclone)
 internal/
   auth/             # OAuth2 + PKCE browser flow
-  api/              # Colab HTTP API client (assign, unassign, keepalive, proxy token, credentials propagation)
+  api/              # Colab HTTP API (assign, assignments, proxy token, keepalive, consumption, resources)
   config/           # Protocol constants, paths
-  runtime/          # TTY WebSocket, Jupyter kernel WebSocket, ANSI stripping
-  session/          # JSON session persistence, keepalive daemon
+  runtime/          # kernel + TTY WebSockets, held keepalive connection, Jupyter contents (fs), ANSI
+  session/          # JSON session store, keepalive daemon
 ```
 
 ## Reference: VS Code Colab Extension

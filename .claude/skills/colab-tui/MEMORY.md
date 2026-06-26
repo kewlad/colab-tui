@@ -1,84 +1,21 @@
-# colab-tui skill — memory log
+# colab-tui skill — runtime learnings (maintained, not append-only)
 
-This is the skill's **append-only memory**. When you learn something about driving Colab (a new failure
-mode, a reap/throttle behavior, a recipe that worked, a tool quirk you fixed), **add a dated entry here**
-— even if it's not yet polished enough for `SKILL.md`. Then, when an entry proves durable and general,
-**promote it into the relevant section of `SKILL.md`** and note "(promoted)" here. This keeps `SKILL.md`
-tight while nothing learned is ever lost.
+A buffer for **un-promoted, dated field observations** — things you noticed at runtime that aren't yet
+trustworthy or general enough to put in `SKILL.md`. Examples: "throttling reaped a fresh A100 in ~4 min
+on 06-30, couldn't reproduce"; a flaky behavior you haven't root-caused; a recipe you tried once.
 
-Format: `## YYYY-MM-DD — short title` then a few lines: what happened, the cause, the fix/rule.
-Newest first.
+**This is a maintained log, not an archive:**
+- When an observation proves durable and general → **promote it into `SKILL.md` and DELETE it here**
+  (git history preserves the old text; no "(promoted)" tombstones — they're what bloats this file).
+- A healthy MEMORY.md trends toward **empty**. If it's growing, promotion isn't happening.
 
----
+**Litmus test before adding:** *if a sentence is about what the tool now does or how it's built, it does
+NOT belong here* — that's `SKILL.md` (operating it), the repo `CLAUDE.md` (protocol/architecture/known
+limitations), or the commit message (what changed). This file is only for not-yet-promotable runtime
+observations.
 
-## 2026-06-26 — initial seed (distilled from prior algo-dev Colab sessions)
-
-The operational rules in `SKILL.md` were distilled from real sessions (mostly real GPU workloads
-treeseg/YOLO work, 2026-06-15 → 06-23). Key load-bearing findings, already promoted to `SKILL.md`:
-
-- Free-tier/throttled runtime idle-reaps ~2.5 h; **only a busy kernel cell counts as activity**, a
-  `colab exec --bg` shell does not.
-- **`colab python --detach` silently fails** to run cells (kernel idle `Ssl`, body never runs) — use
-  synchronous `colab python` under Bash `run_in_background:true`. Cost: hours, before this was understood.
-- Inline args >~10 KB jam the kernel → stage files via gdrive + `colab cp`.
-- `ps -eo pid,stat,cmd | grep colab_kernel`: `Ssl`=idle/never-ran, `<defunct>`=crash, running=busy.
-  `/content` present + idle = launch failure (not reap); `/content` wiped = real recycle.
-- Heavy-use throttling reaps even a fresh runtime within minutes → fall back to local; reap-resilience
-  (per-unit gdrive checkpoint + resume-skip) makes it a non-event.
-- Single-network principle: don't download-then-push; either Colab pulls from S3/GCS or run fully local.
-- rclone many-small-files is Drive-throttled → tar into one file.
-- ~2-concurrent-GPU cap → HTTP 412 on `start`; start sequentially.
-- Monitor with ONE heartbeat loop + local `rclone` on checkpoints, never N one-shot waiters (they leak).
-- Tool fixes already shipped: `python --detach`, stdin, `attach`, rclone remotes, base64-wrapped
-  `exec --bg` (env/pipes/redirects work), WebSocket retry on bad-handshake/1006.
-
-Full original context lives in memory note `prefer-colab-model-inference` and the `project-workflow` skill.
+Format: `## YYYY-MM-DD — short title`, newest first.
 
 ---
 
-## 2026-06-26 — major tool overhaul + protocol refresh to upstream v0.8.1
-
-Reviewed the whole colab-tui codebase and shipped 6 commits. Net changes agents should know:
-
-- **`colab health`** is the new one-call status check (keepalive, token TTL, server-side assignment,
-  kernel busy/idle, /content reap sentinel, GPU → ALIVE/BUSY/REAPED/DOWN verdict). Use it instead of
-  `ps | grep colab_kernel`. **`colab quota`** (compute units / burn / runway / free quota) and
-  **`colab resources`** (RAM/disk/GPU) added. `colab list` now reconciles with server assignments.
-- **`--detach` race fixed** — it waits for the kernel's execute_input confirmation before returning, so
-  it no longer silently drops the cell. Keep inline payloads <~10 KB.
-- **Keepalive now mimics VS Code**: the daemon HOLDS a kernel WS open (Colab won't reap a runtime with a
-  live client) + 90s WS ping + 5min HTTP ping, gated on the held connection. Validated against upstream
-  (extension gates on `kernel.connections > 0`).
-- **Protocol refreshed to v0.8.1**: `runtime-proxy-token`, `assignments`, `user-info` now hit the GAPI
-  host `colab.pa.googleapis.com/v1/*` (were `/tun/m`); two new required headers
-  (X-Colab-VS-Code-App-Name / -Extension-Version); `authuser=0` only on colabDomain; TTY WS drops
-  client-agent. **`restart` was checked — it's correct (POST /api/kernels/{id}/restart).**
-- **TTY stays** (NOT collapsed to kernel-only): the terminal WS runs in PARALLEL to a busy kernel cell —
-  it's the side-channel for monitoring while a job trains. Kernel = run work; TTY = parallel monitor.
-
-⚠️ **NOT yet live-verified**: the GAPI-domain switch and the connection-holding keepalive are correct
-against upstream source but need a real multi-hour runtime smoke test. If long sessions or token refresh
-misbehave, suspect the domain switch first. Full protocol map in the repo `CLAUDE.md`.
-
-To re-audit against a newer extension: clone `googlecolab/colab-vscode`, diff
-`src/colab/{client,api,headers,keep-alive}.ts` against `internal/`, bump `config.ExtVersion`.
-
----
-
-## 2026-06-27 — fs command, multi-runtime targeting, keepalive self-cleans
-
-- **`colab fs ls/cat/get/put/rm`** — direct runtime filesystem over the Jupyter Contents API (no rclone,
-  no Drive consent). Byte-exact (live-verified text + binary roundtrips on a CPU session). Use for small
-  files/edits; `colab cp` (rclone) still preferred for bulk/single-network.
-- **Targeting safety**: with >1 runtime assigned, commands now REFUSE to guess (error lists the labels) —
-  pass `--label`/positional `[LABEL]`. Single runtime stays zero-friction. Mutating commands echo
-  `[label]` to stderr; `fs put/get/rm` name the machine. Live-verified with two CPU sessions.
-- **Keepalive stops dead sessions**: each 5-min ping re-lists assignments (VS Code per-cycle parity) and,
-  if the endpoint is no longer assigned, removes the orphaned session + exits — no more pinging a dead
-  runtime forever (the old `ltx` daemon did exactly that via the dead old host). Deliberate diff from VS
-  Code: we do NOT idle-tombstone after 1h (agents want the runtime held across idle gaps).
-- Full CPU-session test matrix passed: start/health/status/resources/quota/list/exec(TTY+kernel)/
-  exec --bg+logs/python/--detach/restart/fs(all)/stop. NOT waited out: the 5-min daemon self-clean cycle
-  end-to-end (building blocks verified).
-
-<!-- Append new dated entries above this line. -->
+<!-- Add un-promoted observations above this line. (Currently empty — all learnings are in SKILL.md / CLAUDE.md.) -->
