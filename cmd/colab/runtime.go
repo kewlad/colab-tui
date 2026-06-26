@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -139,6 +140,8 @@ func newStartCmd() *cobra.Command {
 			// Drop the reap-detection sentinel so `colab health` can tell a
 			// recycled container (fresh VM, /content wiped) from a live one.
 			writeRuntimeSentinel(info.BaseURL, info.Token, info.Endpoint)
+			sess.SentinelSet = true
+			_ = store.Save()
 
 			if gdrive {
 				fmt.Println()
@@ -253,27 +256,42 @@ func newListCmd() *cobra.Command {
 						label, a.Variant, a.Accelerator, a.MachineShape, a.Endpoint, ka, "assigned")
 				}
 			}
-			// Local entries the server no longer lists = stale (reaped/unassigned).
+			// Reconcile: a local entry the server no longer lists is an orphan
+			// (its runtime was reaped/unassigned). When the server query
+			// succeeded, prune them — that's the authoritative signal. When it
+			// failed, keep them and just mark status unknown.
+			var pruned []string
 			for _, s := range sessions {
 				if seen[s.Endpoint] {
 					continue
 				}
-				srv := "STALE (not assigned)"
-				if aerr != nil {
-					srv = "?" // couldn't reach the server
+				if aerr == nil {
+					if s.KeepalivePID > 0 {
+						if proc, err := os.FindProcess(s.KeepalivePID); err == nil {
+							proc.Signal(syscall.SIGTERM)
+						}
+					}
+					store.Remove(s.Label)
+					pruned = append(pruned, s.Label)
+					continue
 				}
 				ka := "dead"
 				if session.IsKeepaliveRunning(s.Endpoint) {
 					ka = fmt.Sprintf("alive (PID %d)", s.KeepalivePID)
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					s.Label, s.Variant, s.Accelerator, "-", s.Endpoint, ka, srv)
+					s.Label, s.Variant, s.Accelerator, "-", s.Endpoint, ka, "?")
 			}
 			w.Flush()
 
+			if len(pruned) > 0 {
+				_ = store.Save()
+				fmt.Fprintf(os.Stderr, "\n(pruned %d stale entries no longer assigned server-side: %s)\n",
+					len(pruned), strings.Join(pruned, ", "))
+			}
 			if aerr != nil {
 				fmt.Fprintf(os.Stderr, "\n(server assignment check failed: %v — showing local state only)\n", aerr)
-			} else if len(assignments) == 0 && len(sessions) == 0 {
+			} else if len(assignments) == 0 {
 				fmt.Println("No active runtimes.")
 			}
 			return nil
@@ -388,6 +406,8 @@ func newResumeCmd() *cobra.Command {
 				fmt.Printf("  Kernel: %s\n", kernelID)
 			}
 			writeRuntimeSentinel(pt.URL, pt.Token, s.Endpoint)
+			s.SentinelSet = true
+			_ = store.Save()
 			return nil
 		},
 	}

@@ -22,7 +22,8 @@ type Session struct {
 	TokenExpiry  time.Time `json:"token_expiry"`
 	AssignedAt   time.Time `json:"assigned_at"`
 	KeepalivePID int       `json:"keepalive_pid"`
-	BgLogPath    string    `json:"bg_log_path,omitempty"` // log of the most recent `exec --bg` job
+	BgLogPath    string    `json:"bg_log_path,omitempty"`  // log of the most recent `exec --bg` job
+	SentinelSet  bool      `json:"sentinel_set,omitempty"` // we wrote /content/.colab-tui → reap detection is armed
 }
 
 // Store persists sessions to a JSON file.

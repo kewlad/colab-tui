@@ -101,6 +101,21 @@ func refreshProxyTokenIfNeeded(ctx context.Context, client *api.Client, store *S
 	return true
 }
 
+// runtimeGone reports whether the endpoint is no longer assigned server-side.
+// A query error returns false (can't confirm — don't remove anything).
+func runtimeGone(ctx context.Context, client *api.Client, endpoint string) bool {
+	assignments, err := client.ListAssignments(ctx)
+	if err != nil {
+		return false
+	}
+	for _, a := range assignments {
+		if a.Endpoint == endpoint {
+			return false
+		}
+	}
+	return true
+}
+
 // findByEndpoint returns the session matching the given endpoint.
 func findByEndpoint(store *Store, endpoint string) *Session {
 	for _, s := range store.List() {
@@ -177,6 +192,10 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 
 	log.Printf("keepalive: started for endpoint %s (pid %d)", endpoint, os.Getpid())
 
+	// failCount tracks consecutive reconnect failures; after a sustained run we
+	// check whether the runtime still exists server-side and self-clean if not.
+	failCount := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -191,6 +210,20 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 		case <-heartbeat.C:
 			if held == nil {
 				connect()
+				if held != nil {
+					failCount = 0
+				} else if failCount++; failCount >= 3 && runtimeGone(ctx, client, endpoint) {
+					// The runtime is gone server-side and won't come back —
+					// remove the orphaned session and exit rather than ping forever.
+					log.Printf("keepalive: endpoint %s no longer assigned; removing session and exiting", endpoint)
+					if err := store.Load(); err == nil {
+						if s := findByEndpoint(store, endpoint); s != nil {
+							store.Remove(s.Label)
+							_ = store.Save()
+						}
+					}
+					return nil
+				}
 			} else if err := held.Ping(); err != nil {
 				log.Printf("keepalive: heartbeat ping failed: %v", err)
 				held.Close()

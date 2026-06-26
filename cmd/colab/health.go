@@ -127,17 +127,38 @@ colab_kernel'.`,
 			fmt.Printf("GPU:         %s\n", p["GPU"])
 			fmt.Printf("/content:    %s files\n", p["CONTENTN"])
 
+			sentinelPresent := p["SENTINEL"] == "True"
 			fmt.Println()
-			if p["SENTINEL"] == "False" {
-				// Missing sentinel = either a reaped/recycled VM, or a runtime
-				// started before sentinel tracking — can't be sure which.
-				fmt.Printf("VERDICT: ⚠ no /content sentinel — either REAPED (fresh VM, files wiped)\n")
-				fmt.Printf("or started before sentinel tracking. /content has %s files; if those aren't\n", p["CONTENTN"])
-				fmt.Printf("yours, it was reaped — re-stage inputs / resume from your gdrive checkpoint.\n")
-			} else if state == "busy" {
+			switch {
+			case !sentinelPresent && s.SentinelSet:
+				// We armed reap detection earlier and the marker is now gone →
+				// the container was recycled behind the same endpoint.
+				fmt.Printf("VERDICT: REAPED — a sentinel we wrote is gone, so this is a FRESH VM behind\n")
+				fmt.Printf("the same endpoint; /content was wiped. Re-stage inputs / resume from gdrive.\n")
+			case !sentinelPresent:
+				// Untracked runtime (e.g. started before this feature) — establish
+				// the marker now so future checks can detect a reap. Not an alarm.
+				writeRuntimeSentinel(s.BaseURL, s.Token, s.Endpoint)
+				s.SentinelSet = true
+				_ = store.Save()
+				verdict := "IDLE"
+				if state == "busy" {
+					verdict = "BUSY"
+				}
+				fmt.Printf("VERDICT: ALIVE & %s — reap tracking wasn't armed for this runtime; armed it now\n", verdict)
+				fmt.Printf("(/content has %s files). Re-run health later to detect a reap.\n", p["CONTENTN"])
+			case state == "busy":
+				if !s.SentinelSet {
+					s.SentinelSet = true
+					_ = store.Save()
+				}
 				fmt.Printf("VERDICT: ALIVE & BUSY — a cell is running (this is what keeps it alive).\n")
 				fmt.Printf("A new `colab python` will QUEUE behind it; monitor via `colab exec`/logs.\n")
-			} else {
+			default:
+				if !s.SentinelSet {
+					s.SentinelSet = true
+					_ = store.Save()
+				}
 				fmt.Printf("VERDICT: ALIVE & IDLE — ready to use; /content intact.\n")
 			}
 			return nil
