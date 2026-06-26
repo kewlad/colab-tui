@@ -23,11 +23,24 @@ silently and move on; fix it once so the next run is clean.
 
 A free-tier/throttled Colab runtime **idle-reaps ~every 2.5 h**: the container is torn down and
 `/content` is wiped, leaving a *fresh blank VM behind the same endpoint* — so `colab exec` still
-"works" but everything is gone. **Only a busy Jupyter kernel cell counts as activity.** A
-`colab exec --bg` shell process is invisible to Colab's activity tracker → reaped.
+"works" but everything is gone. **Only a busy Jupyter kernel cell (or a held client connection)
+counts as activity.** A `colab exec --bg` shell process is invisible to Colab's activity tracker → reaped.
 
-⇒ Run long work so the **kernel stays busy**, and make every run **reap-resilient** (checkpoint +
-resume-skip) regardless, because throttling can reap even a fresh runtime within minutes.
+⇒ The `colab start` keepalive daemon now **holds a kernel WebSocket open** for the runtime's lifetime
+(mimicking VS Code, which Colab won't reap while a client is attached). That extends an *idle-but-wanted*
+runtime's life, but does NOT beat the hard idle-reap forever. So still: run long work in a **busy kernel
+cell**, and make every run **reap-resilient** (checkpoint + resume-skip), because throttling can reap even
+a fresh runtime within minutes. **Check state in one call with `colab health`** (below).
+
+## Know the runtime's state: `colab health`
+
+`colab health [label]` is the one-call status check — use it instead of decoding `ps | grep
+colab_kernel`. It reports keepalive, token TTL, **server-side assignment** (authoritative: is this
+runtime still allocated to you?), kernel busy/idle, the `/content` reap sentinel, and GPU, then prints a
+verdict: **ALIVE & IDLE / ALIVE & BUSY / REAPED (fresh VM, /content wiped) / DOWN (unassigned)**. Also:
+- `colab list` — reconciled with the server; shows every assigned runtime + resources + STALE local entries.
+- `colab quota` — compute-unit balance, burn rate, runway, free-tier quota. Check before a long GPU job.
+- `colab resources` (alias `top`) — RAM/disk/GPU usage on the runtime.
 
 ## Quick start (headless, no browser)
 
@@ -55,9 +68,11 @@ colab stop --label myrun                                 # release the GPU slot 
 | A bash one-liner | `colab exec "<cmd>"` (TTY) or `colab exec --kernel "<cmd>"` (robust if TTY wedges) | TTY shell is independent of the busy kernel |
 | Shell job under the 2.5 h window | `colab exec --bg "cd /content && nohup python3 runner.py > run.log 2>&1 &"` | Fine for <2.5 h; poll `colab exec "tail run.log"` |
 
-**`colab python --detach` is NOT reliable — do not use it.** It prints "cell submitted" but the kernel
-often sits idle (`Ssl`) and the body never runs (reproduced repeatedly, especially after any prior
-synchronous cell or with a large inline arg). Use synchronous `colab python` instead.
+**`colab python --detach`** submits a cell and returns once the kernel *confirms it started running it*
+(the launch-race that used to make it silently no-op was fixed 2026-06-26). It's now a valid way to fire
+a long job and disconnect. Still keep the inline payload **small** (<~10 KB — large args can jam the
+kernel); for big code, stage a file and run it. The synchronous `colab python` under the Bash tool's
+`run_in_background:true` is equally good and gives you the full output on completion.
 
 **Don't queue cells:** a second `colab python` **blocks behind** the busy training/inference cell.
 Monitor via an independent channel: `colab exec "tail …"` (TTY), or — better — **local `rclone` on the
@@ -84,8 +99,8 @@ mid-run polling.
 
 On the runtime: `colab exec "ps -eo pid,stat,cmd | grep colab_kernel"`
 
-- **`Ssl` (idle)** → the cell never ran. If `/content` files are **present**, it's a launch-method
-  failure (e.g. `--detach`), NOT a reap — re-launch synchronously.
+- **`Ssl` (idle)** → the cell isn't running. If `/content` files are **present**, it's not a reap —
+  re-launch the cell (prefer `colab health` to confirm the verdict in one call).
 - **`<defunct>`** → kernel crashed → `colab restart` (frees GPU memory too), then relaunch.
 - **running / high CPU** → busy, healthy.
 - **`/content` wiped** → real container recycle (reap). `colab start` a fresh runtime and resume from

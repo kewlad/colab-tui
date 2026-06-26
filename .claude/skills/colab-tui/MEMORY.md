@@ -36,4 +36,33 @@ Full original context lives in memory note `prefer-colab-model-inference` and th
 
 ---
 
+## 2026-06-26 — major tool overhaul + protocol refresh to upstream v0.8.1
+
+Reviewed the whole colab-tui codebase and shipped 6 commits. Net changes agents should know:
+
+- **`colab health`** is the new one-call status check (keepalive, token TTL, server-side assignment,
+  kernel busy/idle, /content reap sentinel, GPU → ALIVE/BUSY/REAPED/DOWN verdict). Use it instead of
+  `ps | grep colab_kernel`. **`colab quota`** (compute units / burn / runway / free quota) and
+  **`colab resources`** (RAM/disk/GPU) added. `colab list` now reconciles with server assignments.
+- **`--detach` race fixed** — it waits for the kernel's execute_input confirmation before returning, so
+  it no longer silently drops the cell. Keep inline payloads <~10 KB.
+- **Keepalive now mimics VS Code**: the daemon HOLDS a kernel WS open (Colab won't reap a runtime with a
+  live client) + 90s WS ping + 5min HTTP ping, gated on the held connection. Validated against upstream
+  (extension gates on `kernel.connections > 0`).
+- **Protocol refreshed to v0.8.1**: `runtime-proxy-token`, `assignments`, `user-info` now hit the GAPI
+  host `colab.pa.googleapis.com/v1/*` (were `/tun/m`); two new required headers
+  (X-Colab-VS-Code-App-Name / -Extension-Version); `authuser=0` only on colabDomain; TTY WS drops
+  client-agent. **`restart` was checked — it's correct (POST /api/kernels/{id}/restart).**
+- **TTY stays** (NOT collapsed to kernel-only): the terminal WS runs in PARALLEL to a busy kernel cell —
+  it's the side-channel for monitoring while a job trains. Kernel = run work; TTY = parallel monitor.
+
+⚠️ **NOT yet live-verified**: the GAPI-domain switch and the connection-holding keepalive are correct
+against upstream source but need a real multi-hour runtime smoke test. If long sessions or token refresh
+misbehave, suspect the domain switch first. Full protocol map in the repo `CLAUDE.md`.
+
+To re-audit against a newer extension: clone `googlecolab/colab-vscode`, diff
+`src/colab/{client,api,headers,keep-alive}.ts` against `internal/`, bump `config.ExtVersion`.
+
+---
+
 <!-- Append new dated entries above this line. -->
