@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -21,20 +22,23 @@ func newWatchCmd() *cobra.Command {
 		interval int
 		forever  bool
 		logPath  string
+		stream   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "watch [LABEL]",
-		Short: "Poll a runtime's kernel/GPU state until a running job finishes (reap-safe)",
-		Long: `Heartbeat monitor for a RUNNING job. Every --interval seconds it prints the
-kernel state + GPU utilization (via REST endpoints, so it never disturbs a busy
-kernel and survives reaps) and exits when the kernel goes idle (cell finished) or
-the runtime is gone. On an idle runtime there's nothing to watch.
+		Short: "Monitor a running job — live output (--stream) or a status/GPU heartbeat",
+		Long: `Watch a RUNNING job, two ways:
 
-  colab watch --label myrun                          # status + GPU each tick
-  colab watch --label myrun --log /content/train.log # + tail that runtime file
+  colab watch --label myrun --stream                 # LIVE output of the running cell
+                                                      #   (taps the kernel's stdout — no log file needed)
+  colab watch --label myrun                          # status + GPU heartbeat each tick
+  colab watch --label myrun --log /content/train.log # heartbeat + tail that runtime file
   colab watch --label myrun --forever                # keep polling even when idle
 
-For a live byte-stream of the running cell's stdout, use 'colab attach' instead.`,
+Use --stream when you don't have (or don't know) a log file — it shows whatever the
+cell prints to stdout, exactly like 'colab attach'. The heartbeat modes use REST
+endpoints, so they never disturb a busy kernel and survive reaps. All exit when the
+cell finishes (or the runtime is gone). On an idle runtime there's nothing to watch.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			authMgr, store, err := loadAuthAndStore()
@@ -49,6 +53,28 @@ For a live byte-stream of the running cell's stdout, use 'colab attach' instead.
 				return err
 			}
 			client := api.NewClient(authMgr)
+
+			// --stream: show the running cell's live stdout (no log path needed),
+			// guarded so it doesn't hang on an idle kernel (which emits nothing).
+			if stream {
+				_, state, kerr := runtime.FirstKernelState(s.BaseURL, s.Token)
+				if kerr != nil {
+					return fmt.Errorf("no kernel reachable — runtime reaped or stopped")
+				}
+				if state != "busy" {
+					fmt.Println("kernel is idle — nothing running to stream. Start a job, then re-run with --stream.")
+					return nil
+				}
+				k, err := runtime.NewKernelAttach(s.BaseURL, s.Token)
+				if err != nil {
+					return fmt.Errorf("connect kernel: %w", err)
+				}
+				defer k.Close()
+				fmt.Fprintf(os.Stderr, "[%s] live output (joins from now; Ctrl-C to detach, the job keeps running)\n", s.Label)
+				err = k.Attach(os.Stdout)
+				fmt.Fprintln(os.Stderr, "— cell finished —")
+				return err
+			}
 
 			first := true
 			prevActive := false
@@ -98,7 +124,8 @@ For a live byte-stream of the running cell's stdout, use 'colab attach' instead.
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
 	cmd.Flags().IntVar(&interval, "interval", 30, "Seconds between checks")
 	cmd.Flags().BoolVar(&forever, "forever", false, "Keep watching even after the kernel goes idle")
-	cmd.Flags().StringVar(&logPath, "log", "", "Tail the last line of this file ON THE RUNTIME each tick (a path, e.g. /content/train.log)")
+	cmd.Flags().BoolVar(&stream, "stream", false, "Show the running cell's LIVE stdout (no log file needed; like 'colab attach')")
+	cmd.Flags().StringVar(&logPath, "log", "", "Heartbeat mode: tail the last line of this file ON THE RUNTIME each tick (e.g. /content/train.log)")
 	return cmd
 }
 
