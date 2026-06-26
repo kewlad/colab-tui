@@ -9,6 +9,12 @@ import (
 
 var verbose bool
 
+// echoTarget notes which runtime a mutating command is acting on. It writes to
+// stderr so it never pollutes captured stdout (e.g. an agent parsing exec output).
+func echoTarget(label string) {
+	fmt.Fprintf(os.Stderr, "[%s]\n", label)
+}
+
 func main() {
 	root := &cobra.Command{
 		Use:           "colab",

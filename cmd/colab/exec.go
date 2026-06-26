@@ -31,6 +31,7 @@ func newExecCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			echoTarget(s.Label)
 
 			command := strings.Join(args, " ")
 			dur := time.Duration(timeout) * time.Second
@@ -96,6 +97,7 @@ func newPythonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			echoTarget(s.Label)
 
 			var code string
 			if file != "" {

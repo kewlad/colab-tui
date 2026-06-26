@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/netanelbi/colab-tui/internal/runtime"
+	"github.com/netanelbi/colab-tui/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -33,16 +34,12 @@ For bulk data prefer 'colab cp' (rclone, streams straight from S3/gdrive).`,
 }
 
 // withSession resolves the session for an fs subcommand.
-func withSession(label string) (baseURL, token string, err error) {
+func withSession(label string) (*session.Session, error) {
 	_, store, err := loadAuthAndStore()
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
-	s, err := resolveSession(store, label)
-	if err != nil {
-		return "", "", err
-	}
-	return s.BaseURL, s.Token, nil
+	return resolveSession(store, label)
 }
 
 func labelFlag(cmd *cobra.Command, label *string) {
@@ -56,7 +53,7 @@ func newFsLsCmd() *cobra.Command {
 		Short: "List a directory on the runtime (default /content)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			baseURL, token, err := withSession(label)
+			s, err := withSession(label)
 			if err != nil {
 				return err
 			}
@@ -64,7 +61,7 @@ func newFsLsCmd() *cobra.Command {
 			if len(args) > 0 {
 				dir = args[0]
 			}
-			entries, err := runtime.ListDir(baseURL, token, dir)
+			entries, err := runtime.ListDir(s.BaseURL, s.Token, dir)
 			if err != nil {
 				return err
 			}
@@ -90,11 +87,11 @@ func newFsCatCmd() *cobra.Command {
 		Short: "Print a file from the runtime",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			baseURL, token, err := withSession(label)
+			s, err := withSession(label)
 			if err != nil {
 				return err
 			}
-			data, err := runtime.GetFile(baseURL, token, args[0])
+			data, err := runtime.GetFile(s.BaseURL, s.Token, args[0])
 			if err != nil {
 				return err
 			}
@@ -113,11 +110,11 @@ func newFsGetCmd() *cobra.Command {
 		Short: "Download a file from the runtime",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			baseURL, token, err := withSession(label)
+			s, err := withSession(label)
 			if err != nil {
 				return err
 			}
-			data, err := runtime.GetFile(baseURL, token, args[0])
+			data, err := runtime.GetFile(s.BaseURL, s.Token, args[0])
 			if err != nil {
 				return err
 			}
@@ -128,7 +125,7 @@ func newFsGetCmd() *cobra.Command {
 			if err := os.WriteFile(local, data, 0644); err != nil {
 				return err
 			}
-			fmt.Printf("Downloaded %s -> %s (%s)\n", args[0], local, humanSize(int64(len(data))))
+			fmt.Printf("Downloaded %s:%s -> %s (%s)\n", s.Label, args[0], local, humanSize(int64(len(data))))
 			return nil
 		},
 	}
@@ -143,7 +140,7 @@ func newFsPutCmd() *cobra.Command {
 		Short: "Upload a file to the runtime",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			baseURL, token, err := withSession(label)
+			s, err := withSession(label)
 			if err != nil {
 				return err
 			}
@@ -155,10 +152,10 @@ func newFsPutCmd() *cobra.Command {
 			if len(args) > 1 {
 				remote = args[1]
 			}
-			if err := runtime.PutFile(baseURL, token, remote, data); err != nil {
+			if err := runtime.PutFile(s.BaseURL, s.Token, remote, data); err != nil {
 				return err
 			}
-			fmt.Printf("Uploaded %s -> %s (%s)\n", args[0], remote, humanSize(int64(len(data))))
+			fmt.Printf("Uploaded %s -> %s:%s (%s)\n", args[0], s.Label, remote, humanSize(int64(len(data))))
 			return nil
 		},
 	}
@@ -173,14 +170,14 @@ func newFsRmCmd() *cobra.Command {
 		Short: "Delete a file or directory on the runtime",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			baseURL, token, err := withSession(label)
+			s, err := withSession(label)
 			if err != nil {
 				return err
 			}
-			if err := runtime.Delete(baseURL, token, args[0]); err != nil {
+			if err := runtime.Delete(s.BaseURL, s.Token, args[0]); err != nil {
 				return err
 			}
-			fmt.Printf("Deleted %s\n", args[0])
+			fmt.Printf("Deleted %s:%s\n", s.Label, args[0])
 			return nil
 		},
 	}

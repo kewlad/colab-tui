@@ -151,6 +151,7 @@ colab start --rclone REMOTE).`,
 			if err != nil {
 				return err
 			}
+			echoTarget(s.Label)
 			script := fmt.Sprintf(`rclone copy %q %q 2>&1 | tail -3; echo "[rclone copy exit $?]"`, args[0], args[1])
 			return runtimeShell(s.BaseURL, s.Token, script, time.Duration(timeout)*time.Second, os.Stdout)
 		},

@@ -53,6 +53,10 @@ colab exec --label myrun "tail -f /content/run.log"      # TTY shell, independen
 colab stop --label myrun                                 # release the GPU slot when done
 ```
 
+**Targeting a machine:** with one runtime, commands use it automatically. With **several assigned,
+commands refuse to guess** — pass `--label <name>` (or a positional `[LABEL]` on `health`/`status`/
+`restart`/`stop`). Mutating commands echo `[label]` to stderr so you always see which box you hit.
+
 **Browser-free commands:** `start` (headless even with `--gpu`/`--rclone`), `python`, `exec`, `cp`,
 `rclone setup/mount`, `list/status/ps/logs/resume/restart/attach/stop`.
 **Browser-triggering — avoid unless the user is at the keyboard:** `auth login`, `drive auth`,

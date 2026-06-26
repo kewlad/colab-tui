@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -41,11 +42,24 @@ func resolveSession(store *session.Store, label string) (*session.Session, error
 		}
 		return s, nil
 	}
-	s := store.GetDefault()
-	if s == nil {
+	// No label: use the single runtime if there's exactly one, but REFUSE to
+	// guess when several are assigned — silently picking the most-recent one
+	// could run a command (or a delete) against the wrong machine.
+	sessions := store.List()
+	switch len(sessions) {
+	case 0:
 		return nil, fmt.Errorf("no active sessions — run: colab start")
+	case 1:
+		return sessions[0], nil
+	default:
+		labels := make([]string, 0, len(sessions))
+		for _, s := range sessions {
+			labels = append(labels, s.Label)
+		}
+		sort.Strings(labels)
+		return nil, fmt.Errorf("%d runtimes assigned (%s) — specify which with --label <LABEL> (or a positional [LABEL])",
+			len(sessions), strings.Join(labels, ", "))
 	}
-	return s, nil
 }
 
 func newStartCmd() *cobra.Command {
