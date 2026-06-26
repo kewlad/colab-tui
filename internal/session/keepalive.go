@@ -198,8 +198,16 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 			}
 
 		case <-ping.C:
-			if err := client.SendKeepalive(ctx, endpoint); err != nil {
-				log.Printf("keepalive: HTTP keep-alive error for %s: %v", endpoint, err)
+			// Mirror the extension's gating: only keep a runtime alive while a
+			// client connection is actually held. If our held connection is down
+			// (runtime likely gone), don't ping a connection-less runtime.
+			if held == nil {
+				connect()
+			}
+			if held != nil {
+				if err := client.SendKeepalive(ctx, endpoint); err != nil {
+					log.Printf("keepalive: HTTP keep-alive error for %s: %v", endpoint, err)
+				}
 			}
 			// Reload store, refresh the token if needed, and reconnect the held
 			// connection with the fresh token if it changed.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/netanelbi/colab-tui/internal/auth"
@@ -72,19 +73,27 @@ type Client struct {
 func NewClient(authMgr *auth.Manager) *Client {
 	return &Client{
 		Auth: authMgr,
-		HTTP: &http.Client{},
+		HTTP: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
-// doRequest performs an HTTP request against the Colab API, injecting auth
-// and standard headers, and stripping the XSS prefix from the response body.
+// doRequest performs a request against the legacy tunnel host (ColabDomain).
 func (c *Client) doRequest(ctx context.Context, method, path string, headers map[string]string) ([]byte, error) {
-	fullURL := config.ColabDomain + path
-	// Google requires authuser param on all colab domain requests
-	if strings.Contains(fullURL, "?") {
-		fullURL += "&authuser=0"
-	} else {
-		fullURL += "?authuser=0"
+	return c.doRequestHost(ctx, method, config.ColabDomain, path, headers)
+}
+
+// doRequestHost performs an HTTP request against the given Colab host, injecting
+// auth and the standard client headers, and stripping the XSS prefix from the
+// response body. authuser=0 is appended only for the legacy ColabDomain host
+// (the GAPI v1 endpoints reject it).
+func (c *Client) doRequestHost(ctx context.Context, method, host, path string, headers map[string]string) ([]byte, error) {
+	fullURL := host + path
+	if host == config.ColabDomain {
+		if strings.Contains(fullURL, "?") {
+			fullURL += "&authuser=0"
+		} else {
+			fullURL += "?authuser=0"
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
@@ -99,6 +108,8 @@ func (c *Client) doRequest(ctx context.Context, method, path string, headers map
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set(config.HAgent, config.HAgentVal)
+	req.Header.Set(config.HAppName, config.AppName)
+	req.Header.Set(config.HExtVersion, config.ExtVersion)
 
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -245,9 +256,11 @@ func (c *Client) Assign(ctx context.Context, variant, accelerator, shape string)
 	}, nil
 }
 
-// ListAssignments returns all currently active runtime assignments.
+// ListAssignments returns all currently active runtime assignments. The GAPI v1
+// listing returns proto-style string enums (VARIANT_GPU, SHAPE_HIGH_MEM), which
+// are normalized to the short forms the rest of the CLI uses.
 func (c *Client) ListAssignments(ctx context.Context) ([]Assignment, error) {
-	body, err := c.doRequest(ctx, http.MethodGet, config.TunBase+"/assignments", nil)
+	body, err := c.doRequestHost(ctx, http.MethodGet, config.ColabGapiDomain, "/v1/assignments", nil)
 	if err != nil {
 		return nil, fmt.Errorf("list assignments: %w", err)
 	}
@@ -257,7 +270,7 @@ func (c *Client) ListAssignments(ctx context.Context) ([]Assignment, error) {
 			Endpoint     string `json:"endpoint"`
 			Variant      string `json:"variant"`
 			Accelerator  string `json:"accelerator"`
-			MachineShape string `json:"machine_shape"`
+			MachineShape string `json:"machineShape"`
 		} `json:"assignments"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -268,30 +281,54 @@ func (c *Client) ListAssignments(ctx context.Context) ([]Assignment, error) {
 	for _, a := range resp.Assignments {
 		out = append(out, Assignment{
 			Endpoint:     a.Endpoint,
-			Variant:      a.Variant,
+			Variant:      normalizeVariant(a.Variant),
 			Accelerator:  a.Accelerator,
-			MachineShape: a.MachineShape,
+			MachineShape: normalizeShape(a.MachineShape),
 		})
 	}
 	return out, nil
+}
+
+// normalizeVariant maps GAPI variant enums to the CLI's short forms.
+func normalizeVariant(v string) string {
+	switch v {
+	case "VARIANT_GPU":
+		return "GPU"
+	case "VARIANT_TPU":
+		return "TPU"
+	case "VARIANT_UNSPECIFIED", "":
+		return "DEFAULT"
+	}
+	return v
+}
+
+// normalizeShape maps GAPI machine-shape enums to the CLI's short forms.
+func normalizeShape(s string) string {
+	switch s {
+	case "SHAPE_HIGH_MEM":
+		return "HIGHMEM"
+	case "SHAPE_DEFAULT", "SHAPE_UNSPECIFIED", "":
+		return "STANDARD"
+	}
+	return s
 }
 
 // RefreshProxyToken fetches a fresh proxy token for the given endpoint.
 // The response may use either `tokenExpiresInSeconds` (int, from assign)
 // or `tokenTtl` (string like "3600s", from refresh endpoint).
 func (c *Client) RefreshProxyToken(ctx context.Context, endpoint string) (*ProxyToken, error) {
-	path := config.TunBase + "/runtime-proxy-token?endpoint=" + endpoint + "&port=8080"
+	path := "/v1/runtime-proxy-token?endpoint=" + endpoint + "&port=8080"
 
-	body, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	body, err := c.doRequestHost(ctx, http.MethodGet, config.ColabGapiDomain, path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("refresh proxy token: %w", err)
 	}
 
 	var resp struct {
-		Token              string `json:"token"`
-		URL                string `json:"url"`
-		TokenExpiresInSec  int    `json:"tokenExpiresInSeconds"`
-		TokenTTL           string `json:"tokenTtl"`
+		Token             string `json:"token"`
+		URL               string `json:"url"`
+		TokenExpiresInSec int    `json:"tokenExpiresInSeconds"`
+		TokenTTL          string `json:"tokenTtl"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("parse proxy token: %w", err)
@@ -390,6 +427,86 @@ func (c *Client) PropagateCredentials(ctx context.Context, endpoint, authType st
 	}
 
 	return &result, nil
+}
+
+// Consumption holds the user's compute-unit / quota status.
+type Consumption struct {
+	SubscriptionTier  string  `json:"subscriptionTier"`
+	PaidComputeUnits  float64 `json:"paidComputeUnitsBalance"`
+	ConsumptionRateHr float64 `json:"consumptionRateHourly"`
+	AssignmentsCount  int     `json:"assignmentsCount"`
+	FreeCcuQuota      *struct {
+		RemainingTokens   string `json:"remainingTokens"` // proto Int64 as string; milli-CCUs
+		NextRefillTimeSec int64  `json:"nextRefillTimestampSec"`
+	} `json:"freeCcuQuotaInfo,omitempty"`
+}
+
+// GetConsumption fetches the user's compute-unit balance / quota from the GAPI
+// user-info endpoint.
+func (c *Client) GetConsumption(ctx context.Context) (*Consumption, error) {
+	body, err := c.doRequestHost(ctx, http.MethodGet, config.ColabGapiDomain,
+		"/v1/user-info?get_ccu_consumption_info=true", nil)
+	if err != nil {
+		return nil, fmt.Errorf("consumption: %w", err)
+	}
+	var out Consumption
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse consumption: %w", err)
+	}
+	return &out, nil
+}
+
+// Resources is the RAM / disk / GPU snapshot from a runtime's resource endpoint.
+type Resources struct {
+	Memory struct {
+		TotalBytes float64 `json:"totalBytes"`
+		FreeBytes  float64 `json:"freeBytes"`
+	} `json:"memory"`
+	Disks []struct {
+		Filesystem struct {
+			Label      string  `json:"label"`
+			TotalBytes float64 `json:"totalBytes"`
+			UsedBytes  float64 `json:"usedBytes"`
+		} `json:"filesystem"`
+	} `json:"disks"`
+	GPUs []struct {
+		Name             string  `json:"name"`
+		MemoryUsedBytes  float64 `json:"memoryUsedBytes"`
+		MemoryTotalBytes float64 `json:"memoryTotalBytes"`
+		GPUUtilization   float64 `json:"gpuUtilization"`
+		EverUsed         bool    `json:"everUsed"`
+	} `json:"gpus"`
+}
+
+// GetResources fetches RAM/disk/GPU stats from the runtime's proxy endpoint.
+// baseURL/token are the runtime proxy URL + proxy token (not the OAuth bearer),
+// so this is independent of the GAPI/tunnel auth used by the other calls.
+func (c *Client) GetResources(ctx context.Context, baseURL, token string) (*Resources, error) {
+	url := strings.TrimRight(baseURL, "/") + "/api/colab/resources"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(config.HProxyToken, token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("resources: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("resources API error %d: %s", resp.StatusCode, string(body))
+	}
+	var out Resources
+	if err := json.Unmarshal([]byte(StripXSS(string(body))), &out); err != nil {
+		return nil, fmt.Errorf("parse resources: %w", err)
+	}
+	return &out, nil
 }
 
 // SendKeepalive pings the runtime to prevent it from being reclaimed.

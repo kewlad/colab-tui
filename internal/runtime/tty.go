@@ -42,7 +42,8 @@ func NewTTY(baseURL, token string) (*TTY, error) {
 	wsURL := toWS(baseURL) + "/colab/tty"
 	hdr := http.Header{}
 	hdr.Set(config.HProxyToken, token)
-	hdr.Set(config.HAgent, config.HAgentVal)
+	// The terminal WS carries only the proxy token — upstream deliberately does
+	// NOT send X-Colab-Client-Agent here (unlike the kernel WS).
 
 	conn, err := dialWSRetry(wsURL, hdr)
 	if err != nil {
