@@ -192,9 +192,19 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 
 	log.Printf("keepalive: started for endpoint %s (pid %d)", endpoint, os.Getpid())
 
-	// failCount tracks consecutive reconnect failures; after a sustained run we
-	// check whether the runtime still exists server-side and self-clean if not.
-	failCount := 0
+	// cleanup tears down the held connection and removes the orphaned session.
+	cleanup := func() {
+		if held != nil {
+			held.Close()
+			held = nil
+		}
+		if err := store.Load(); err == nil {
+			if s := findByEndpoint(store, endpoint); s != nil {
+				store.Remove(s.Label)
+				_ = store.Save()
+			}
+		}
+	}
 
 	for {
 		select {
@@ -208,22 +218,10 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 			connect()
 
 		case <-heartbeat.C:
+			// Keep the held connection warm; reconnect if it dropped. Death is
+			// detected authoritatively on the ping cycle, not here.
 			if held == nil {
 				connect()
-				if held != nil {
-					failCount = 0
-				} else if failCount++; failCount >= 3 && runtimeGone(ctx, client, endpoint) {
-					// The runtime is gone server-side and won't come back —
-					// remove the orphaned session and exit rather than ping forever.
-					log.Printf("keepalive: endpoint %s no longer assigned; removing session and exiting", endpoint)
-					if err := store.Load(); err == nil {
-						if s := findByEndpoint(store, endpoint); s != nil {
-							store.Remove(s.Label)
-							_ = store.Save()
-						}
-					}
-					return nil
-				}
 			} else if err := held.Ping(); err != nil {
 				log.Printf("keepalive: heartbeat ping failed: %v", err)
 				held.Close()
@@ -231,9 +229,16 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 			}
 
 		case <-ping.C:
-			// Mirror the extension's gating: only keep a runtime alive while a
-			// client connection is actually held. If our held connection is down
-			// (runtime likely gone), don't ping a connection-less runtime.
+			// Like the VS Code extension, RE-VERIFY liveness every cycle and stop
+			// keeping a dead runtime alive: if Colab no longer lists this endpoint
+			// as assigned, clean up and exit instead of pinging into the void.
+			// (runtimeGone returns false on a query error, so a transient network
+			// blip never wrongly kills a live session.)
+			if runtimeGone(ctx, client, endpoint) {
+				log.Printf("keepalive: endpoint %s no longer assigned; removing session and exiting", endpoint)
+				cleanup()
+				return nil
+			}
 			if held == nil {
 				connect()
 			}
