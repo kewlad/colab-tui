@@ -110,7 +110,20 @@ colab_kernel'.`,
 			}
 			fmt.Printf("Kernel:      %s\n", state)
 
-			// Run the probe to detect a reap (sentinel gone) and report GPU/files.
+			// A busy kernel can't run our probe cell without queuing behind the
+			// running cell — so don't try. Busy means it's clearly alive (and not a
+			// reaped fresh VM, which wouldn't have a busy kernel); report and stop.
+			if state == "busy" {
+				if !s.SentinelSet {
+					s.SentinelSet = true
+					_ = store.Save()
+				}
+				fmt.Printf("\nVERDICT: ALIVE & BUSY — a cell is running (this is what keeps it alive).\n")
+				fmt.Printf("A new `colab python` QUEUES behind it; monitor via `colab exec`/`colab logs`.\n")
+				return nil
+			}
+
+			// Idle kernel: run the probe to detect a reap (sentinel gone) + report GPU/files.
 			k, err := runtime.NewKernel(s.BaseURL, s.Token)
 			if err != nil {
 				fmt.Printf("Probe:       failed to connect kernel: %v\n", err)
@@ -141,19 +154,8 @@ colab_kernel'.`,
 				writeRuntimeSentinel(s.BaseURL, s.Token, s.Endpoint)
 				s.SentinelSet = true
 				_ = store.Save()
-				verdict := "IDLE"
-				if state == "busy" {
-					verdict = "BUSY"
-				}
-				fmt.Printf("VERDICT: ALIVE & %s — reap tracking wasn't armed for this runtime; armed it now\n", verdict)
+				fmt.Printf("VERDICT: ALIVE & IDLE — reap tracking wasn't armed for this runtime; armed it now\n")
 				fmt.Printf("(/content has %s files). Re-run health later to detect a reap.\n", p["CONTENTN"])
-			case state == "busy":
-				if !s.SentinelSet {
-					s.SentinelSet = true
-					_ = store.Save()
-				}
-				fmt.Printf("VERDICT: ALIVE & BUSY — a cell is running (this is what keeps it alive).\n")
-				fmt.Printf("A new `colab python` will QUEUE behind it; monitor via `colab exec`/logs.\n")
 			default:
 				if !s.SentinelSet {
 					s.SentinelSet = true

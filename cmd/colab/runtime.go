@@ -351,14 +351,13 @@ func newStatusCmd() *cobra.Command {
 			}
 			fmt.Printf("Keepalive:   %s\n", kaStatus)
 
-			// Try to get kernel status
-			k, err := runtime.NewKernel(s.BaseURL, s.Token)
-			if err == nil {
-				state, err := k.GetStatus()
-				if err == nil {
-					fmt.Printf("Kernel:      %s\n", state)
-				}
-				k.Close()
+			// Kernel state via the REST API (no WebSocket handshake) — instant
+			// even when the kernel is busy. Opening a kernel WS here would block
+			// on the kernel_info handshake until a running cell finishes.
+			if _, state, err := runtime.FirstKernelState(s.BaseURL, s.Token); err == nil {
+				fmt.Printf("Kernel:      %s\n", state)
+			} else {
+				fmt.Printf("Kernel:      none\n")
 			}
 			_ = authMgr // used for potential token refresh
 			return nil

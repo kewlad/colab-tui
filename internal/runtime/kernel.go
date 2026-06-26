@@ -91,18 +91,22 @@ func NewKernel(baseURL, token string) (*Kernel, error) {
 
 	k := &Kernel{conn: conn, kernelID: kernelID, sessionID: sessionID, baseURL: baseURL, token: token}
 
-	// Send kernel_info_request and drain until the reply (required handshake).
+	// Warm up the connection with a kernel_info_request, but DON'T require the
+	// reply: kernel_info is serviced on the shell channel, so a BUSY kernel won't
+	// answer until its running cell finishes. Waiting for it would make every
+	// connect (status/health/exec) hang until the kernel goes idle. A short
+	// deadline + proceed-on-timeout keeps connect fast; the connection is fully
+	// usable regardless (a later execute_request just queues behind the busy cell).
 	infoID := uuid.NewString()
 	if err := conn.WriteJSON(newJupyterMsg(infoID, sessionID, "kernel_info_request", nil)); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("kernel info request: %w", err)
 	}
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for {
 		var resp map[string]interface{}
 		if err := conn.ReadJSON(&resp); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("kernel handshake: %w", err)
+			break // busy kernel (or slow) — proceed without the reply
 		}
 		if msgTypeOf(resp) == "kernel_info_reply" {
 			break
