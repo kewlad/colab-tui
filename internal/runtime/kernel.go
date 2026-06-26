@@ -14,6 +14,11 @@ import (
 	"github.com/netanelbi/colab-tui/internal/config"
 )
 
+// httpClient is the shared client for the Jupyter REST API. A timeout is set so
+// a hung runtime can't block a command forever (the WebSocket paths manage their
+// own deadlines separately).
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
 // Kernel holds a WebSocket connection to a Jupyter kernel.
 type Kernel struct {
 	conn      *websocket.Conn
@@ -23,17 +28,55 @@ type Kernel struct {
 	token     string
 }
 
-// kernelInfo is used to parse the /api/kernels list response.
+// kernelInfo is used to parse the /api/kernels list and detail responses.
 type kernelInfo struct {
 	ID             string `json:"id"`
 	ExecutionState string `json:"execution_state"`
 }
 
-// NewKernel fetches the first available kernel and dials its channel WebSocket.
+// kernelGet performs an authenticated GET against the runtime's Jupyter REST API
+// and unmarshals the JSON response into out. path is appended to baseURL.
+func kernelGet(baseURL, token, path string, out interface{}) error {
+	url := strings.TrimRight(baseURL, "/") + path
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(config.HProxyToken, token)
+	req.Header.Set(config.HAgent, config.HAgentVal)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(body, out)
+}
+
+// dialChannel opens the kernel's channel WebSocket (session_id is required by the
+// Colab proxy) with the standard auth headers and transient-failure retries.
+func dialChannel(baseURL, token, kernelID, sessionID string) (*websocket.Conn, error) {
+	wsURL := toWS(baseURL) + "/api/kernels/" + kernelID + "/channels?session_id=" + sessionID
+	hdr := http.Header{}
+	hdr.Set(config.HProxyToken, token)
+	hdr.Set(config.HAgent, config.HAgentVal)
+	return dialWSRetry(wsURL, hdr)
+}
+
+// NewKernel fetches the first available kernel (creating a session if none exist)
+// and dials its channel WebSocket, completing the kernel_info handshake.
 func NewKernel(baseURL, token string) (*Kernel, error) {
 	kernelID, err := fetchFirstKernelID(baseURL, token)
 	if err != nil {
-		// No kernels — try creating a session to start one
+		// No kernels — try creating a session to start one.
 		kernelID, err = CreateSession(baseURL, token, "colab-tui")
 		if err != nil {
 			return nil, fmt.Errorf("no kernels and session creation failed: %w", err)
@@ -41,38 +84,19 @@ func NewKernel(baseURL, token string) (*Kernel, error) {
 	}
 
 	sessionID := uuid.NewString()
-	wsURL := toWS(baseURL) + "/api/kernels/" + kernelID + "/channels?session_id=" + sessionID
-	hdr := http.Header{}
-	hdr.Set(config.HProxyToken, token)
-	hdr.Set(config.HAgent, config.HAgentVal)
-
-	conn, err := dialWSRetry(wsURL, hdr)
+	conn, err := dialChannel(baseURL, token, kernelID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("kernel dial: %w", err)
 	}
 
 	k := &Kernel{conn: conn, kernelID: kernelID, sessionID: sessionID, baseURL: baseURL, token: token}
 
-	// Send kernel_info_request and drain initial messages (required handshake).
-	infoMsg := jupyterMsg{
-		Header: map[string]string{
-			"msg_id":   uuid.NewString(),
-			"msg_type": "kernel_info_request",
-			"session":  sessionID,
-			"username": "",
-			"version":  "5.2",
-		},
-		ParentHeader: map[string]interface{}{},
-		Metadata:     map[string]interface{}{},
-		Content:      map[string]interface{}{},
-		Channel:      "shell",
-	}
-	if err := conn.WriteJSON(infoMsg); err != nil {
+	// Send kernel_info_request and drain until the reply (required handshake).
+	infoID := uuid.NewString()
+	if err := conn.WriteJSON(newJupyterMsg(infoID, sessionID, "kernel_info_request", nil)); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("kernel info request: %w", err)
 	}
-
-	// Drain until kernel_info_reply
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	for {
 		var resp map[string]interface{}
@@ -80,10 +104,8 @@ func NewKernel(baseURL, token string) (*Kernel, error) {
 			conn.Close()
 			return nil, fmt.Errorf("kernel handshake: %w", err)
 		}
-		if hdr, ok := resp["header"].(map[string]interface{}); ok {
-			if mt, _ := hdr["msg_type"].(string); mt == "kernel_info_reply" {
-				break
-			}
+		if msgTypeOf(resp) == "kernel_info_reply" {
+			break
 		}
 	}
 	conn.SetReadDeadline(time.Time{}) // clear deadline
@@ -98,44 +120,18 @@ func NewKernelAttach(baseURL, token string) (*Kernel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("no kernels: %w", err)
 	}
-
 	sessionID := uuid.NewString()
-	wsURL := toWS(baseURL) + "/api/kernels/" + kernelID + "/channels?session_id=" + sessionID
-	hdr := http.Header{}
-	hdr.Set(config.HProxyToken, token)
-	hdr.Set(config.HAgent, config.HAgentVal)
-
-	conn, err := dialWSRetry(wsURL, hdr)
+	conn, err := dialChannel(baseURL, token, kernelID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("kernel dial: %w", err)
 	}
-
 	return &Kernel{conn: conn, kernelID: kernelID, sessionID: sessionID, baseURL: baseURL, token: token}, nil
 }
 
 func fetchFirstKernelID(baseURL, token string) (string, error) {
-	url := strings.TrimRight(baseURL, "/") + "/api/kernels"
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("kernel list request: %w", err)
-	}
-	req.Header.Set(config.HProxyToken, token)
-	req.Header.Set(config.HAgent, config.HAgentVal)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("kernel list: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("kernel list read: %w", err)
-	}
-
 	var kernels []kernelInfo
-	if err := json.Unmarshal(body, &kernels); err != nil {
-		return "", fmt.Errorf("kernel list parse: %w", err)
+	if err := kernelGet(baseURL, token, "/api/kernels", &kernels); err != nil {
+		return "", fmt.Errorf("kernel list: %w", err)
 	}
 	if len(kernels) == 0 {
 		return "", fmt.Errorf("no kernels available")
@@ -149,25 +145,70 @@ type jupyterMsg struct {
 	ParentHeader map[string]interface{} `json:"parent_header"`
 	Metadata     map[string]interface{} `json:"metadata"`
 	Content      map[string]interface{} `json:"content"`
-	MsgType      string                 `json:"msg_type,omitempty"`
 	Channel      string                 `json:"channel,omitempty"`
+}
+
+// newJupyterMsg builds a shell-channel message of the given type. If content is
+// nil an empty object is sent.
+func newJupyterMsg(msgID, sessionID, msgType string, content map[string]interface{}) jupyterMsg {
+	if content == nil {
+		content = map[string]interface{}{}
+	}
+	return jupyterMsg{
+		Header: map[string]string{
+			"msg_id":   msgID,
+			"msg_type": msgType,
+			"session":  sessionID,
+			"username": "",
+			"version":  "5.2",
+		},
+		ParentHeader: map[string]interface{}{},
+		Metadata:     map[string]interface{}{},
+		Content:      content,
+		Channel:      "shell",
+	}
+}
+
+// executeContent is the standard content block for an execute_request.
+func executeContent(code string) map[string]interface{} {
+	return map[string]interface{}{
+		"code":          code,
+		"silent":        false,
+		"store_history": true,
+		"allow_stdin":   false,
+		"stop_on_error": true,
+	}
+}
+
+// msgTypeOf / parentIDOf / contentOf are small accessors for the loosely-typed
+// inbound messages.
+func msgTypeOf(resp map[string]interface{}) string {
+	hdr, _ := resp["header"].(map[string]interface{})
+	mt, _ := hdr["msg_type"].(string)
+	return mt
+}
+
+func parentIDOf(resp map[string]interface{}) string {
+	ph, _ := resp["parent_header"].(map[string]interface{})
+	id, _ := ph["msg_id"].(string)
+	return id
+}
+
+func contentOf(resp map[string]interface{}) map[string]interface{} {
+	c, _ := resp["content"].(map[string]interface{})
+	return c
 }
 
 // handleColabRequest checks if a WebSocket message is a colab_request
 // (e.g. request_auth for Drive mount) and auto-replies with input_reply.
 // Returns true if the message was handled.
 func (k *Kernel) handleColabRequest(resp map[string]interface{}) bool {
-	hdr, _ := resp["header"].(map[string]interface{})
-	msgType, _ := hdr["msg_type"].(string)
-	if msgType != "colab_request" {
+	if msgTypeOf(resp) != "colab_request" {
 		return false
 	}
-
-	// Extract colab_msg_id from metadata
 	meta, _ := resp["metadata"].(map[string]interface{})
 	colabMsgID, _ := meta["colab_msg_id"].(float64) // JSON numbers are float64
 
-	// Send input_reply to unblock the kernel
 	reply := map[string]interface{}{
 		"header": map[string]string{
 			"msg_id":   uuid.NewString(),
@@ -187,163 +228,40 @@ func (k *Kernel) handleColabRequest(resp map[string]interface{}) bool {
 		"metadata":      map[string]interface{}{},
 		"parent_header": map[string]interface{}{},
 	}
-
 	k.conn.WriteJSON(reply)
 	return true
 }
 
-// Execute sends code to the kernel and collects output until execute_reply.
-func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
+// sendExecute writes an execute_request to the kernel and returns its msg_id.
+func (k *Kernel) sendExecute(code string) (string, error) {
 	msgID := uuid.NewString()
-
-	msg := jupyterMsg{
-		Header: map[string]string{
-			"msg_id":   msgID,
-			"msg_type": "execute_request",
-			"session":  k.sessionID,
-			"username": "",
-			"version":  "5.2",
-		},
-		ParentHeader: map[string]interface{}{},
-		Metadata:     map[string]interface{}{},
-		Content: map[string]interface{}{
-			"code":            code,
-			"silent":          false,
-			"store_history":   true,
-			"allow_stdin":     false,
-			"stop_on_error":   true,
-		},
-		Channel: "shell",
-	}
-
+	msg := newJupyterMsg(msgID, k.sessionID, "execute_request", executeContent(code))
 	if err := k.conn.WriteJSON(msg); err != nil {
 		return "", fmt.Errorf("kernel execute write: %w", err)
 	}
-
-	var outputParts []string
-	if timeout > 0 {
-		k.conn.SetReadDeadline(time.Now().Add(timeout))
-	} else {
-		k.conn.SetReadDeadline(time.Time{}) // no deadline
-	}
-
-	for {
-		var resp map[string]interface{}
-		if err := k.conn.ReadJSON(&resp); err != nil {
-			return "", fmt.Errorf("kernel execute read: %w", err)
-		}
-
-		// Handle colab_request messages (e.g. Drive auth)
-		if k.handleColabRequest(resp) {
-			continue
-		}
-
-		hdr, _ := resp["header"].(map[string]interface{})
-		msgType, _ := hdr["msg_type"].(string)
-		content, _ := resp["content"].(map[string]interface{})
-
-		switch msgType {
-		case "stream":
-			if text, ok := content["text"].(string); ok {
-				outputParts = append(outputParts, text)
-			}
-		case "execute_result":
-			if data, ok := content["data"].(map[string]interface{}); ok {
-				if text, ok := data["text/plain"].(string); ok {
-					outputParts = append(outputParts, text)
-				}
-			}
-		case "error":
-			ename, _ := content["ename"].(string)
-			evalue, _ := content["evalue"].(string)
-			return "", fmt.Errorf("kernel error %s: %s", ename, evalue)
-		case "execute_reply":
-			// Done collecting output.
-			return strings.Join(outputParts, ""), nil
-		}
-	}
+	return msgID, nil
 }
 
-// ExecuteDetach sends an execute_request and returns immediately without waiting for the reply.
-// The kernel runs the cell to completion regardless of the client connection (Jupyter semantics),
-// so this is the way to launch long-running work (e.g. training) while keeping the kernel "busy"
-// — which prevents Colab from idle-reaping the runtime. Monitor via Attach or an out-of-band log.
-func (k *Kernel) ExecuteDetach(code string) error {
-	msg := jupyterMsg{
-		Header: map[string]string{
-			"msg_id":   uuid.NewString(),
-			"msg_type": "execute_request",
-			"session":  k.sessionID,
-			"username": "",
-			"version":  "5.2",
-		},
-		ParentHeader: map[string]interface{}{},
-		Metadata:     map[string]interface{}{},
-		Content: map[string]interface{}{
-			"code":          code,
-			"silent":        false,
-			"store_history": true,
-			"allow_stdin":   false,
-			"stop_on_error": true,
-		},
-		Channel: "shell",
+// runCell sends code and pumps the reply loop, writing output to w until the
+// kernel returns execute_reply. When printTraceback is true, an error message's
+// traceback is written to w before returning; otherwise the error is returned
+// without polluting w. This single loop backs both Execute and ExecuteStream.
+func (k *Kernel) runCell(code string, w io.Writer, timeout time.Duration, printTraceback bool) error {
+	if _, err := k.sendExecute(code); err != nil {
+		return err
 	}
-	if err := k.conn.WriteJSON(msg); err != nil {
-		return fmt.Errorf("kernel execute_detach write: %w", err)
-	}
-	return nil
-}
-
-// ExecuteStream sends code to the kernel and streams output to w in real-time.
-func (k *Kernel) ExecuteStream(code string, w io.Writer, timeout time.Duration) error {
-	msgID := uuid.NewString()
-
-	msg := jupyterMsg{
-		Header: map[string]string{
-			"msg_id":   msgID,
-			"msg_type": "execute_request",
-			"session":  k.sessionID,
-			"username": "",
-			"version":  "5.2",
-		},
-		ParentHeader: map[string]interface{}{},
-		Metadata:     map[string]interface{}{},
-		Content: map[string]interface{}{
-			"code":          code,
-			"silent":        false,
-			"store_history": true,
-			"allow_stdin":   false,
-			"stop_on_error": true,
-		},
-		Channel: "shell",
-	}
-
-	if err := k.conn.WriteJSON(msg); err != nil {
-		return fmt.Errorf("kernel execute write: %w", err)
-	}
-
-	if timeout > 0 {
-		k.conn.SetReadDeadline(time.Now().Add(timeout))
-	} else {
-		k.conn.SetReadDeadline(time.Time{}) // no deadline
-	}
+	k.setDeadline(timeout)
 
 	for {
 		var resp map[string]interface{}
 		if err := k.conn.ReadJSON(&resp); err != nil {
 			return fmt.Errorf("kernel execute read: %w", err)
 		}
-
-		// Handle colab_request messages (e.g. Drive auth)
 		if k.handleColabRequest(resp) {
 			continue
 		}
-
-		hdr, _ := resp["header"].(map[string]interface{})
-		msgType, _ := hdr["msg_type"].(string)
-		content, _ := resp["content"].(map[string]interface{})
-
-		switch msgType {
+		content := contentOf(resp)
+		switch msgTypeOf(resp) {
 		case "stream":
 			if text, ok := content["text"].(string); ok {
 				fmt.Fprint(w, text)
@@ -355,11 +273,12 @@ func (k *Kernel) ExecuteStream(code string, w io.Writer, timeout time.Duration) 
 				}
 			}
 		case "error":
-			// Print traceback to stderr-like output, then return error
-			if tb, ok := content["traceback"].([]interface{}); ok {
-				for _, line := range tb {
-					if s, ok := line.(string); ok {
-						fmt.Fprintln(w, s)
+			if printTraceback {
+				if tb, ok := content["traceback"].([]interface{}); ok {
+					for _, line := range tb {
+						if s, ok := line.(string); ok {
+							fmt.Fprintln(w, StripAnsi(s))
+						}
 					}
 				}
 			}
@@ -372,9 +291,72 @@ func (k *Kernel) ExecuteStream(code string, w io.Writer, timeout time.Duration) 
 	}
 }
 
-// Attach connects to the kernel and streams all IOPub output from any running
-// execution. It does not send an execute_request — it just listens.
-// Returns nil when the kernel goes idle (execution finished), or on error.
+func (k *Kernel) setDeadline(timeout time.Duration) {
+	if timeout > 0 {
+		k.conn.SetReadDeadline(time.Now().Add(timeout))
+	} else {
+		k.conn.SetReadDeadline(time.Time{})
+	}
+}
+
+// Execute sends code to the kernel and returns the collected output.
+func (k *Kernel) Execute(code string, timeout time.Duration) (string, error) {
+	var buf strings.Builder
+	if err := k.runCell(code, &buf, timeout, false); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// ExecuteStream sends code to the kernel and streams output to w in real-time.
+func (k *Kernel) ExecuteStream(code string, w io.Writer, timeout time.Duration) error {
+	return k.runCell(code, w, timeout, true)
+}
+
+// ExecuteDetach submits a cell and returns as soon as the kernel CONFIRMS it has
+// started executing it (the execute_input echo, or a busy status for our msg_id).
+// Waiting for that confirmation is essential: WriteJSON only flushes to the
+// socket buffer, so closing the connection right after a bare write races the
+// server consuming the request — which is why the old fire-and-forget detach
+// silently dropped cells. Once the kernel is busy on the cell it runs to
+// completion regardless of the client (Jupyter semantics), keeping the runtime
+// alive. Monitor via Attach or an out-of-band log.
+func (k *Kernel) ExecuteDetach(code string) error {
+	msgID, err := k.sendExecute(code)
+	if err != nil {
+		return err
+	}
+	k.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	defer k.conn.SetReadDeadline(time.Time{})
+
+	for {
+		var resp map[string]interface{}
+		if err := k.conn.ReadJSON(&resp); err != nil {
+			return fmt.Errorf("detach: confirm cell start: %w", err)
+		}
+		if k.handleColabRequest(resp) {
+			continue
+		}
+		if parentIDOf(resp) != msgID {
+			continue
+		}
+		switch msgTypeOf(resp) {
+		case "execute_input":
+			return nil // kernel has begun running the cell
+		case "status":
+			if state, _ := contentOf(resp)["execution_state"].(string); state == "busy" {
+				return nil
+			}
+		case "error":
+			ename, _ := contentOf(resp)["ename"].(string)
+			evalue, _ := contentOf(resp)["evalue"].(string)
+			return fmt.Errorf("kernel error %s: %s", ename, evalue)
+		}
+	}
+}
+
+// Attach streams all IOPub output from any running execution without sending an
+// execute_request. Returns nil when the kernel goes idle (execution finished).
 func (k *Kernel) Attach(w io.Writer) error {
 	k.conn.SetReadDeadline(time.Time{}) // no deadline
 
@@ -383,16 +365,11 @@ func (k *Kernel) Attach(w io.Writer) error {
 		if err := k.conn.ReadJSON(&resp); err != nil {
 			return fmt.Errorf("attach read: %w", err)
 		}
-
 		if k.handleColabRequest(resp) {
 			continue
 		}
-
-		hdr, _ := resp["header"].(map[string]interface{})
-		msgType, _ := hdr["msg_type"].(string)
-		content, _ := resp["content"].(map[string]interface{})
-
-		switch msgType {
+		content := contentOf(resp)
+		switch msgTypeOf(resp) {
 		case "stream":
 			if text, ok := content["text"].(string); ok {
 				fmt.Fprint(w, text)
@@ -407,7 +384,7 @@ func (k *Kernel) Attach(w io.Writer) error {
 			if tb, ok := content["traceback"].([]interface{}); ok {
 				for _, line := range tb {
 					if s, ok := line.(string); ok {
-						fmt.Fprintln(w, s)
+						fmt.Fprintln(w, StripAnsi(s))
 					}
 				}
 			}
@@ -424,30 +401,11 @@ func (k *Kernel) Attach(w io.Writer) error {
 	}
 }
 
-// GetStatus returns the execution_state of the kernel.
+// GetStatus returns the execution_state of the kernel (busy / idle / starting).
 func (k *Kernel) GetStatus() (string, error) {
-	url := strings.TrimRight(k.baseURL, "/") + "/api/kernels/" + k.kernelID
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("kernel status request: %w", err)
-	}
-	req.Header.Set(config.HProxyToken, k.token)
-	req.Header.Set(config.HAgent, config.HAgentVal)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("kernel status: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("kernel status read: %w", err)
-	}
-
 	var info kernelInfo
-	if err := json.Unmarshal(body, &info); err != nil {
-		return "", fmt.Errorf("kernel status parse: %w", err)
+	if err := kernelGet(k.baseURL, k.token, "/api/kernels/"+k.kernelID, &info); err != nil {
+		return "", fmt.Errorf("kernel status: %w", err)
 	}
 	return info.ExecutionState, nil
 }
@@ -458,73 +416,37 @@ func (k *Kernel) Restart() error {
 	k.conn.Close()
 
 	url := strings.TrimRight(k.baseURL, "/") + "/api/kernels/" + k.kernelID + "/restart"
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
 		return fmt.Errorf("kernel restart request: %w", err)
 	}
 	req.Header.Set(config.HProxyToken, k.token)
 	req.Header.Set(config.HAgent, config.HAgentVal)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("kernel restart: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("kernel restart failed (%d): %s", resp.StatusCode, string(body))
 	}
 
-	// Wait for kernel to come back (poll status up to 30s)
+	// Wait for the kernel to come back (poll status up to 30s).
 	for i := 0; i < 30; i++ {
 		time.Sleep(time.Second)
-		state, err := k.getStatusHTTP()
-		if err == nil && (state == "idle" || state == "starting") {
+		if state, err := k.GetStatus(); err == nil && (state == "idle" || state == "starting") {
 			break
 		}
 	}
 
-	// Reconnect WebSocket (must include session_id for Colab proxy)
-	wsURL := toWS(k.baseURL) + "/api/kernels/" + k.kernelID + "/channels?session_id=" + k.sessionID
-	hdr := http.Header{}
-	hdr.Set(config.HProxyToken, k.token)
-	hdr.Set(config.HAgent, config.HAgentVal)
-
-	conn, err := dialWSRetry(wsURL, hdr)
+	conn, err := dialChannel(k.baseURL, k.token, k.kernelID, k.sessionID)
 	if err != nil {
 		return fmt.Errorf("kernel reconnect after restart: %w", err)
 	}
 	k.conn = conn
 	return nil
-}
-
-// getStatusHTTP fetches kernel status without using the WebSocket.
-func (k *Kernel) getStatusHTTP() (string, error) {
-	url := strings.TrimRight(k.baseURL, "/") + "/api/kernels/" + k.kernelID
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set(config.HProxyToken, k.token)
-	req.Header.Set(config.HAgent, config.HAgentVal)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	var info kernelInfo
-	if err := json.Unmarshal(body, &info); err != nil {
-		return "", err
-	}
-	return info.ExecutionState, nil
 }
 
 // Close closes the underlying WebSocket connection.
@@ -537,15 +459,13 @@ func (k *Kernel) Close() error {
 // recognizes it as a VS Code-style session and displays the notebook title.
 // Colab's frontend regex: ^(?!.*fileId=)(.*)(-jvsc-|-intellij-).*(\.[^.]+)$
 func CreateSession(baseURL, token, label string) (kernelID string, err error) {
-	// Strip .ipynb suffix if already present to avoid double extension
+	// Strip .ipynb suffix if already present to avoid double extension.
 	label = strings.TrimSuffix(label, ".ipynb")
 	nbName := label + ".ipynb"
 
 	// The path must contain "-jvsc-" for Colab's web UI to extract the title.
 	// Format: {title}-jvsc-{id}.{ext} → Colab shows "{title}.{ext}"
 	sessionPath := label + "-jvsc-" + uuid.NewString() + ".ipynb"
-
-	sessionURL := strings.TrimRight(baseURL, "/") + "/api/sessions"
 
 	body := map[string]interface{}{
 		"name": nbName,
@@ -555,13 +475,12 @@ func CreateSession(baseURL, token, label string) (kernelID string, err error) {
 			"name": "python3",
 		},
 	}
-
 	data, err := json.Marshal(body)
 	if err != nil {
 		return "", fmt.Errorf("marshal session body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", sessionURL, bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/sessions", bytes.NewReader(data))
 	if err != nil {
 		return "", fmt.Errorf("create session request: %w", err)
 	}
@@ -569,7 +488,7 @@ func CreateSession(baseURL, token, label string) (kernelID string, err error) {
 	req.Header.Set(config.HAgent, config.HAgentVal)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("create session: %w", err)
 	}
@@ -579,7 +498,6 @@ func CreateSession(baseURL, token, label string) (kernelID string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("read session response: %w", err)
 	}
-
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("create session failed (%d): %s", resp.StatusCode, string(respBody))
 	}
@@ -592,6 +510,5 @@ func CreateSession(baseURL, token, label string) (kernelID string, err error) {
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return "", fmt.Errorf("parse session response: %w", err)
 	}
-
 	return result.Kernel.ID, nil
 }
