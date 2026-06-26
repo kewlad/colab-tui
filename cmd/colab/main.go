@@ -41,6 +41,7 @@ func main() {
 		newHealthCmd(),
 		newQuotaCmd(),
 		newResourcesCmd(),
+		newWatchCmd(),
 		newKeepaliveCmd(),
 		newDriveCmd(),
 		newRcloneCmd(),
