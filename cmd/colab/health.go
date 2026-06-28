@@ -19,8 +19,8 @@ const sentinelPath = "/content/.colab-tui"
 
 // writeRuntimeSentinel drops the reap-detection marker on the runtime. Best
 // effort — failures are non-fatal (health just reports the marker missing).
-func writeRuntimeSentinel(baseURL, token, endpoint string) {
-	k, err := runtime.NewKernel(baseURL, token)
+func writeRuntimeSentinel(baseURL, token, endpoint, label string) {
+	k, err := runtime.NewKernel(baseURL, token, label)
 	if err != nil {
 		return
 	}
@@ -124,7 +124,7 @@ colab_kernel'.`,
 			}
 
 			// Idle kernel: run the probe to detect a reap (sentinel gone) + report GPU/files.
-			k, err := runtime.NewKernel(s.BaseURL, s.Token)
+			k, err := runtime.NewKernel(s.BaseURL, s.Token, s.Label)
 			if err != nil {
 				fmt.Printf("Probe:       failed to connect kernel: %v\n", err)
 				return nil
@@ -151,7 +151,7 @@ colab_kernel'.`,
 			case !sentinelPresent:
 				// Untracked runtime (e.g. started before this feature) — establish
 				// the marker now so future checks can detect a reap. Not an alarm.
-				writeRuntimeSentinel(s.BaseURL, s.Token, s.Endpoint)
+				writeRuntimeSentinel(s.BaseURL, s.Token, s.Endpoint, s.Label)
 				s.SentinelSet = true
 				_ = store.Save()
 				fmt.Printf("VERDICT: ALIVE & IDLE — reap tracking wasn't armed for this runtime; armed it now\n")

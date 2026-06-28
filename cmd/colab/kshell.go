@@ -34,8 +34,8 @@ func isTTYWedge(err error) bool {
 // PTY-marker scraping and terminal wedges that plague the TTY path. The command
 // is base64'd to avoid all quoting, run via subprocess, and both stdout+stderr
 // are returned.
-func kernelShell(baseURL, token, cmd string, timeout time.Duration) (string, error) {
-	k, err := runtime.NewKernel(baseURL, token)
+func kernelShell(baseURL, token, label, cmd string, timeout time.Duration) (string, error) {
+	k, err := runtime.NewKernel(baseURL, token, label)
 	if err != nil {
 		return "", fmt.Errorf("kernel connect: %w", err)
 	}
@@ -52,7 +52,7 @@ _s.stdout.write(_p.stderr)`, enc)
 // automatically falling back to the kernel when the TTY is wedged. Output is
 // written to w. This is the resilient primitive the exec/cp/rclone commands use
 // so a stuck terminal no longer blocks the whole workflow.
-func runtimeShell(baseURL, token, cmd string, timeout time.Duration, w io.Writer) error {
+func runtimeShell(baseURL, token, label, cmd string, timeout time.Duration, w io.Writer) error {
 	tty, terr := runtime.NewTTY(baseURL, token)
 	if terr == nil {
 		defer tty.Close()
@@ -67,7 +67,7 @@ func runtimeShell(baseURL, token, cmd string, timeout time.Duration, w io.Writer
 	} else if !isTTYWedge(terr) {
 		return fmt.Errorf("connect TTY: %w", terr)
 	}
-	out, err := kernelShell(baseURL, token, cmd, timeout)
+	out, err := kernelShell(baseURL, token, label, cmd, timeout)
 	if err != nil {
 		return err
 	}

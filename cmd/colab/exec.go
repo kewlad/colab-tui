@@ -57,7 +57,7 @@ func newExecCmd() *cobra.Command {
 			}
 
 			if kernelMode {
-				out, err := kernelShell(s.BaseURL, s.Token, command, dur)
+				out, err := kernelShell(s.BaseURL, s.Token, s.Label, command, dur)
 				if err != nil {
 					return err
 				}
@@ -69,7 +69,7 @@ func newExecCmd() *cobra.Command {
 			}
 
 			// TTY, auto-falling back to the kernel channel if the terminal is wedged.
-			return runtimeShell(s.BaseURL, s.Token, command, dur, os.Stdout)
+			return runtimeShell(s.BaseURL, s.Token, s.Label, command, dur, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
@@ -140,7 +140,7 @@ A busy kernel keeps the runtime alive; --detach fires a long cell and returns.`,
 				}
 			}
 
-			k, err := runtime.NewKernel(s.BaseURL, s.Token)
+			k, err := runtime.NewKernel(s.BaseURL, s.Token, s.Label)
 			if err != nil {
 				return fmt.Errorf("connect kernel: %w", err)
 			}

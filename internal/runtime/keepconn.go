@@ -24,9 +24,10 @@ type KeepaliveConn struct {
 }
 
 // DialKeepalive opens a held kernel connection for the runtime, ensuring a kernel
-// exists (creating a session if the runtime is fresh / was reaped).
-func DialKeepalive(baseURL, token string) (*KeepaliveConn, error) {
-	k, err := NewKernel(baseURL, token)
+// exists (creating a session if the runtime is fresh / was reaped). label names
+// any session it creates so the held kernel is attributed to its runtime.
+func DialKeepalive(baseURL, token, label string) (*KeepaliveConn, error) {
+	k, err := NewKernel(baseURL, token, label)
 	if err != nil {
 		return nil, err
 	}

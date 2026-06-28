@@ -117,7 +117,7 @@ func newDriveMountCmd() *cobra.Command {
 			client := api.NewClient(authMgr)
 			client.Verbose = verbose
 
-			return mountDrive(cmd.Context(), client, s.Endpoint, s.BaseURL, s.Token, mountpoint, time.Duration(timeout)*time.Second)
+			return mountDrive(cmd.Context(), client, s.Endpoint, s.BaseURL, s.Token, s.Label, mountpoint, time.Duration(timeout)*time.Second)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
@@ -128,7 +128,7 @@ func newDriveMountCmd() *cobra.Command {
 
 // mountDrive propagates Drive credentials and executes drive.mount() in the kernel.
 // If consent hasn't been given for this runtime, it triggers the browser flow.
-func mountDrive(ctx context.Context, client *api.Client, endpoint, baseURL, token, mountpoint string, timeout time.Duration) error {
+func mountDrive(ctx context.Context, client *api.Client, endpoint, baseURL, token, label, mountpoint string, timeout time.Duration) error {
 	fmt.Println("Propagating Drive credentials...")
 
 	// Try direct propagation
@@ -143,7 +143,7 @@ func mountDrive(ctx context.Context, client *api.Client, endpoint, baseURL, toke
 
 	// Execute drive.mount() in the kernel
 	fmt.Printf("Mounting Drive at %s...\n", mountpoint)
-	k, err := runtime.NewKernel(baseURL, token)
+	k, err := runtime.NewKernel(baseURL, token, label)
 	if err != nil {
 		return fmt.Errorf("connect kernel: %w", err)
 	}

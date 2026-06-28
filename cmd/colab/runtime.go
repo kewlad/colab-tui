@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -118,32 +119,18 @@ func newStartCmd() *cobra.Command {
 				AssignedAt:  time.Now(),
 			}
 
-			// Spawn keepalive as detached subprocess
-			kaCmd := exec.Command(os.Args[0], "keepalive", "--endpoint", info.Endpoint)
-			kaCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-			kaCmd.Stdout = nil
-			kaCmd.Stderr = nil
-			if err := kaCmd.Start(); err != nil {
-				fmt.Printf("Warning: failed to start keepalive: %v\n", err)
-			} else {
-				sess.KeepalivePID = kaCmd.Process.Pid
-				// Detach — don't wait for keepalive
-				go kaCmd.Wait()
-			}
-
-			store.Add(sess)
-			if err := store.Save(); err != nil {
-				return fmt.Errorf("save session: %w", err)
-			}
-
 			fmt.Printf("Runtime assigned:\n")
 			fmt.Printf("  Endpoint:    %s\n", info.Endpoint)
 			fmt.Printf("  Variant:     %s\n", info.Variant)
 			fmt.Printf("  Accelerator: %s\n", info.Accelerator)
 			fmt.Printf("  Base URL:    %s\n", info.BaseURL)
-			fmt.Printf("  Keepalive:   PID %d\n", sess.KeepalivePID)
 
-			// Create Jupyter session (notebook naming + kernel start)
+			// Create the Jupyter session FIRST — before launching keepalive — so
+			// a kernel already exists when the daemon connects. Otherwise the
+			// daemon races ahead, finds zero kernels, and creates its OWN
+			// session: a duplicate row in Colab's Active Sessions panel, and the
+			// keepalive ends up holding that kernel while the labeled one is left
+			// to idle-reap.
 			fmt.Printf("Creating notebook session (%s.ipynb)...\n", label)
 			kernelID, err := runtime.CreateSession(info.BaseURL, info.Token, label)
 			if err != nil {
@@ -153,19 +140,40 @@ func newStartCmd() *cobra.Command {
 			}
 			// Drop the reap-detection sentinel so `colab health` can tell a
 			// recycled container (fresh VM, /content wiped) from a live one.
-			writeRuntimeSentinel(info.BaseURL, info.Token, info.Endpoint)
+			writeRuntimeSentinel(info.BaseURL, info.Token, info.Endpoint, label)
 			sess.SentinelSet = true
+
+			// Persist the session before launching keepalive — the daemon reads
+			// the store (by endpoint) to get the base URL + token.
+			store.Add(sess)
+			if err := store.Save(); err != nil {
+				return fmt.Errorf("save session: %w", err)
+			}
+
+			// Spawn keepalive as a detached subprocess. It now finds the kernel
+			// created above and HOLDS it (never creating a duplicate).
+			kaCmd := exec.Command(os.Args[0], "keepalive", "--endpoint", info.Endpoint)
+			kaCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			kaCmd.Stdout = nil
+			kaCmd.Stderr = nil
+			if err := kaCmd.Start(); err != nil {
+				fmt.Printf("Warning: failed to start keepalive: %v\n", err)
+			} else {
+				sess.KeepalivePID = kaCmd.Process.Pid
+				go kaCmd.Wait() // detach — don't block
+			}
+			fmt.Printf("  Keepalive:   PID %d\n", sess.KeepalivePID)
 			_ = store.Save()
 
 			if gdrive {
 				fmt.Println()
-				if err := mountDrive(context.Background(), client, info.Endpoint, info.BaseURL, info.Token, "/content/drive", 120*time.Second); err != nil {
+				if err := mountDrive(context.Background(), client, info.Endpoint, info.BaseURL, info.Token, label, "/content/drive", 120*time.Second); err != nil {
 					fmt.Printf("Warning: Drive mount failed: %v\n", err)
 				}
 			}
 			if rcloneRemote != "" {
 				fmt.Println()
-				if err := setupRcloneRemote(info.BaseURL, info.Token, rcloneRemote); err != nil {
+				if err := setupRcloneRemote(info.BaseURL, info.Token, label, rcloneRemote); err != nil {
 					fmt.Printf("Warning: rclone setup failed: %v\n", err)
 				}
 			}
@@ -392,8 +400,27 @@ func newResumeCmd() *cobra.Command {
 			s.Token = pt.Token
 			s.BaseURL = pt.URL
 			s.TokenExpiry = time.Now().Add(time.Duration(pt.ExpiresIn) * time.Second)
+			fmt.Printf("Resumed %s — new token expires in %s\n", s.Label, time.Duration(pt.ExpiresIn)*time.Second)
 
-			// Restart keepalive if dead
+			// Ensure a kernel exists BEFORE (re)starting keepalive, so the daemon
+			// holds the labeled kernel rather than racing ahead and creating its
+			// own. Reuse the live kernel if there is one — create only when the
+			// runtime CONFIRMS it has none (fresh / reaped). A transient list
+			// error is left alone: keepalive will reconcile on reconnect.
+			if _, _, kerr := runtime.FirstKernelState(pt.URL, pt.Token); errors.Is(kerr, runtime.ErrNoKernels) {
+				fmt.Printf("Creating notebook session (%s.ipynb)...\n", s.Label)
+				if kernelID, cerr := runtime.CreateSession(pt.URL, pt.Token, s.Label); cerr != nil {
+					fmt.Printf("  Warning: session creation failed: %v\n", cerr)
+				} else {
+					fmt.Printf("  Kernel: %s\n", kernelID)
+				}
+			} else {
+				fmt.Printf("Kernel already running — reusing it.\n")
+			}
+			writeRuntimeSentinel(pt.URL, pt.Token, s.Endpoint, s.Label)
+			s.SentinelSet = true
+
+			// Restart keepalive if dead — it now finds the kernel above and holds it.
 			if !session.IsKeepaliveRunning(s.Endpoint) {
 				kaCmd := exec.Command(os.Args[0], "keepalive", "--endpoint", s.Endpoint)
 				kaCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -408,19 +435,6 @@ func newResumeCmd() *cobra.Command {
 			if err := store.Save(); err != nil {
 				return err
 			}
-			fmt.Printf("Resumed %s — new token expires in %s\n", s.Label, time.Duration(pt.ExpiresIn)*time.Second)
-
-			// Re-create session if no kernel exists
-			fmt.Printf("Ensuring notebook session (%s.ipynb)...\n", s.Label)
-			kernelID, err := runtime.CreateSession(pt.URL, pt.Token, s.Label)
-			if err != nil {
-				fmt.Printf("  Warning: session creation failed: %v\n", err)
-			} else {
-				fmt.Printf("  Kernel: %s\n", kernelID)
-			}
-			writeRuntimeSentinel(pt.URL, pt.Token, s.Endpoint)
-			s.SentinelSet = true
-			_ = store.Save()
 			return nil
 		},
 	}
@@ -445,7 +459,7 @@ func newRestartCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Restarting kernel on %s...\n", s.Label)
-			k, err := runtime.NewKernel(s.BaseURL, s.Token)
+			k, err := runtime.NewKernel(s.BaseURL, s.Token, s.Label)
 			if err != nil {
 				return fmt.Errorf("connect kernel: %w", err)
 			}

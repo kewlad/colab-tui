@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,13 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/netanelbi/colab-tui/internal/config"
 )
+
+// ErrNoKernels signals the runtime was reachable but reported ZERO kernels — the
+// only condition under which creating a new session is correct (the runtime is
+// fresh or its kernel died). A transient list failure (network/proxy/token blip)
+// must NOT be mistaken for this, or every reconnect hiccup would mint a duplicate
+// session on a machine whose kernel is still alive.
+var ErrNoKernels = errors.New("runtime has no kernels")
 
 // httpClient is the shared client for the Jupyter REST API. A timeout is set so
 // a hung runtime can't block a command forever (the WebSocket paths manage their
@@ -72,12 +80,25 @@ func dialChannel(baseURL, token, kernelID, sessionID string) (*websocket.Conn, e
 }
 
 // NewKernel fetches the first available kernel (creating a session if none exist)
-// and dials its channel WebSocket, completing the kernel_info handshake.
-func NewKernel(baseURL, token string) (*Kernel, error) {
+// and dials its channel WebSocket, completing the kernel_info handshake. label
+// names any session it has to create, so an auto-recreated session is attributed
+// to its runtime (e.g. "v16a") rather than a generic bucket. An empty label
+// falls back to "colab-tui".
+func NewKernel(baseURL, token, label string) (*Kernel, error) {
+	if label == "" {
+		label = "colab-tui"
+	}
 	kernelID, err := fetchFirstKernelID(baseURL, token)
 	if err != nil {
-		// No kernels — try creating a session to start one.
-		kernelID, err = CreateSession(baseURL, token, "colab-tui")
+		// Only create a session when the runtime CONFIRMS it has no kernels.
+		// A transient list error (the common case right after a WS drop, when
+		// keepalive reconnects) must reuse the still-alive kernel on the next
+		// try — never spawn a duplicate session. That accumulation is exactly
+		// the "spam" seen in Colab's Active Sessions panel.
+		if !errors.Is(err, ErrNoKernels) {
+			return nil, fmt.Errorf("kernel list: %w", err)
+		}
+		kernelID, err = CreateSession(baseURL, token, label)
 		if err != nil {
 			return nil, fmt.Errorf("no kernels and session creation failed: %w", err)
 		}
@@ -147,7 +168,7 @@ func FirstKernelState(baseURL, token string) (id, state string, err error) {
 		return "", "", fmt.Errorf("kernel list: %w", err)
 	}
 	if len(kernels) == 0 {
-		return "", "", fmt.Errorf("no kernels available")
+		return "", "", ErrNoKernels
 	}
 	return kernels[0].ID, kernels[0].ExecutionState, nil
 }
@@ -504,8 +525,18 @@ func CreateSession(baseURL, token, label string) (kernelID string, err error) {
 	nbName := label + ".ipynb"
 
 	// The path must contain "-jvsc-" for Colab's web UI to extract the title.
-	// Format: {title}-jvsc-{id}.{ext} → Colab shows "{title}.{ext}"
-	sessionPath := label + "-jvsc-" + uuid.NewString() + ".ipynb"
+	// Format: {title}-jvsc-{id}.{ext} → Colab shows "{title}.{ext}".
+	//
+	// The "-jvsc-" id is DETERMINISTIC in the label (UUIDv5), not random: Jupyter
+	// keys sessions by path, so a stable path makes re-creates idempotent — a
+	// reconnect (or a recreate after a genuine kernel death) reuses the SAME
+	// session row instead of spawning a new one. Verified on a live runtime:
+	// re-POSTing an existing path returns the same session; if the kernel died
+	// (Colab also drops the session), the re-POST yields a fresh live kernel
+	// under the same path. Either way the "Active Sessions" panel shows one row
+	// per label, not a growing pile.
+	jvscID := uuid.NewSHA1(uuid.NameSpaceURL, []byte("colab-tui:"+label)).String()
+	sessionPath := label + "-jvsc-" + jvscID + ".ipynb"
 
 	body := map[string]interface{}{
 		"name": nbName,

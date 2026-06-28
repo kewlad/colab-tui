@@ -165,7 +165,7 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 		if sess == nil {
 			return
 		}
-		kc, err := runtime.DialKeepalive(sess.BaseURL, sess.Token)
+		kc, err := runtime.DialKeepalive(sess.BaseURL, sess.Token, sess.Label)
 		if err != nil {
 			log.Printf("keepalive: hold-connection dial failed: %v", err)
 			return

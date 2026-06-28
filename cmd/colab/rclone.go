@@ -31,7 +31,7 @@ func rcloneRemoteConfig(remote string) (string, error) {
 // Google Drive consent browser. Idempotent and multi-remote-safe (re-pushing a
 // remote replaces just its section). After this, the runtime can `rclone copy`
 // to/from "<remote>:path" and scripts on the box can save their own outputs.
-func setupRcloneRemote(baseURL, token, remote string) error {
+func setupRcloneRemote(baseURL, token, label, remote string) error {
 	cfg, err := rcloneRemoteConfig(remote)
 	if err != nil {
 		return err
@@ -48,7 +48,7 @@ rclone lsd %s: >/dev/null 2>&1 && echo "OK: remote '%s' reachable from the runti
 		b64, remote, remote, remote, remote)
 
 	fmt.Printf("Setting up rclone remote %q on the runtime (headless, no consent)...\n", remote)
-	return runtimeShell(baseURL, token, script, 300*time.Second, os.Stdout)
+	return runtimeShell(baseURL, token, label, script, 300*time.Second, os.Stdout)
 }
 
 func newRcloneCmd() *cobra.Command {
@@ -80,7 +80,7 @@ func newRcloneSetupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return setupRcloneRemote(s.BaseURL, s.Token, args[0])
+			return setupRcloneRemote(s.BaseURL, s.Token, s.Label, args[0])
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
@@ -117,7 +117,7 @@ a runtime crash can lose writes still buffered in the VFS cache.`,
 rclone mount %q %q --daemon --vfs-cache-mode writes --dir-cache-time 10s --allow-non-empty 2>&1
 sleep 2; mountpoint -q %q && echo "mounted %s at %s" || echo "WARN: mount may have failed"`,
 				mountpoint, src, mountpoint, mountpoint, src, mountpoint)
-			return runtimeShell(s.BaseURL, s.Token, script, 60*time.Second, os.Stdout)
+			return runtimeShell(s.BaseURL, s.Token, s.Label, script, 60*time.Second, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
@@ -153,7 +153,7 @@ colab start --rclone REMOTE).`,
 			}
 			echoTarget(s.Label)
 			script := fmt.Sprintf(`rclone copy %q %q 2>&1 | tail -3; echo "[rclone copy exit $?]"`, args[0], args[1])
-			return runtimeShell(s.BaseURL, s.Token, script, time.Duration(timeout)*time.Second, os.Stdout)
+			return runtimeShell(s.BaseURL, s.Token, s.Label, script, time.Duration(timeout)*time.Second, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
