@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/netanelbi/colab-tui/internal/auth"
+	"github.com/netanelbi/colab-tui/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +50,11 @@ func newAuthStatusCmd() *cobra.Command {
 				fmt.Println("Not authenticated. Run: colab auth login")
 				return nil
 			}
-			fmt.Println("Authenticated (refresh token present)")
+			if m.Email != "" {
+				fmt.Printf("Authenticated as %s [profile: %s]\n", m.Email, config.Profile())
+			} else {
+				fmt.Printf("Authenticated (refresh token present) [profile: %s]\n", config.Profile())
+			}
 			// Try to get an access token to verify
 			tok, err := m.GetAccessToken(context.Background())
 			if err != nil {

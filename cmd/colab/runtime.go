@@ -154,6 +154,7 @@ func newStartCmd() *cobra.Command {
 			// created above and HOLDS it (never creating a duplicate).
 			kaCmd := exec.Command(os.Args[0], "keepalive", "--endpoint", info.Endpoint)
 			kaCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			kaCmd.Env = append(os.Environ(), "COLAB_PROFILE="+config.Profile())
 			kaCmd.Stdout = nil
 			kaCmd.Stderr = nil
 			if err := kaCmd.Start(); err != nil {
@@ -424,6 +425,7 @@ func newResumeCmd() *cobra.Command {
 			if !session.IsKeepaliveRunning(s.Endpoint) {
 				kaCmd := exec.Command(os.Args[0], "keepalive", "--endpoint", s.Endpoint)
 				kaCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+				kaCmd.Env = append(os.Environ(), "COLAB_PROFILE="+config.Profile())
 				if err := kaCmd.Start(); err != nil {
 					fmt.Printf("Warning: failed to restart keepalive: %v\n", err)
 				} else {

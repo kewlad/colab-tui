@@ -138,6 +138,20 @@ fresh + resume from checkpoint.
 - Not an abuse risk — first-party-sanctioned protocol; the only real limit on Pro is the ~2-concurrent-GPU
   cap (HTTP 412, a throttle, not a strike).
 
+**Multiple Google accounts (profiles).** Each profile is an isolated config tree (own token, sessions,
+keepalive daemons) under `~/.config/colab-tui/profiles/<name>/`, so different accounts run in parallel —
+each with its own ~2-GPU cap. Profile precedence: `--profile <name>` flag > `COLAB_PROFILE=<name>` env >
+persisted default (`profile use`) > `default`. The flag must come before the subcommand
+(`colab --profile work start`, not `colab start --profile work`).
+```bash
+colab --profile work auth login      # one-time browser login per account
+colab profile use work               # persist as default — no more --profile needed
+colab profile list                   # show profiles + emails; * marks the active one
+COLAB_PROFILE=work colab list        # env form (one-off override for a shell session)
+```
+A profile appears in `profile list` only after its first `auth login`. Your pre-existing single-account
+setup is auto-migrated into `default` on first run — nothing to do.
+
 ## Improving the tool
 
 You're encouraged to fix/extend colab-tui when you hit a limitation — that's how `fs`, `health`, `quota`,

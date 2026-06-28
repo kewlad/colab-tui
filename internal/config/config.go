@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -40,11 +41,87 @@ const (
 	HExtVersion = "X-Colab-VS-Code-Extension-Version"
 )
 
-func ConfigDir() string {
+// activeProfile selects which on-disk profile (Google account) the CLI operates
+// on. Each profile is an isolated directory tree, so different accounts run in
+// parallel without sharing tokens, sessions, or keepalive daemons. Set via
+// SetProfile (from the --profile flag or COLAB_PROFILE env) before any path
+// helper is called; defaults to "default".
+var activeProfile = "default"
+
+// SetProfile selects the active profile. An empty name resets to "default".
+func SetProfile(name string) {
+	if name == "" {
+		name = "default"
+	}
+	activeProfile = name
+}
+
+// Profile returns the active profile name.
+func Profile() string { return activeProfile }
+
+// baseDir is the root config tree shared by all profiles.
+func baseDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "colab-tui")
 }
 
+// ProfilesDir holds one subdirectory per profile.
+func ProfilesDir() string { return filepath.Join(baseDir(), "profiles") }
+
+// activeFile persists the user-selected default profile (set via
+// `colab profile use`). It sits at the config root, outside any profile dir.
+func activeFile() string { return filepath.Join(baseDir(), "active") }
+
+// ReadActiveProfile returns the persisted default profile name, or "" if none
+// has been set. Used as a precedence step below the --profile flag and env.
+func ReadActiveProfile() string {
+	data, err := os.ReadFile(activeFile())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// WriteActiveProfile persists name as the default profile for future commands.
+func WriteActiveProfile(name string) error {
+	if err := os.MkdirAll(baseDir(), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(activeFile(), []byte(name+"\n"), 0600)
+}
+
+// ConfigDir returns the active profile's config directory,
+// e.g. ~/.config/colab-tui/profiles/<profile>.
+func ConfigDir() string { return filepath.Join(ProfilesDir(), activeProfile) }
+
 func AuthFile() string     { return filepath.Join(ConfigDir(), "auth.json") }
 func SessionsFile() string { return filepath.Join(ConfigDir(), "sessions.json") }
 func PidDir() string       { return filepath.Join(ConfigDir(), "pids") }
+
+// MigrateLegacy moves a pre-multi-profile single-account config
+// (~/.config/colab-tui/{auth.json,sessions.json,pids}) into the "default"
+// profile directory. It is a no-op if there is nothing to migrate or the
+// default profile already exists. Safe to call on every startup.
+func MigrateLegacy() error {
+	legacyAuth := filepath.Join(baseDir(), "auth.json")
+	if _, err := os.Stat(legacyAuth); err != nil {
+		return nil // nothing to migrate
+	}
+	defaultDir := filepath.Join(ProfilesDir(), "default")
+	if _, err := os.Stat(filepath.Join(defaultDir, "auth.json")); err == nil {
+		return nil // don't clobber an existing default profile
+	}
+	if err := os.MkdirAll(defaultDir, 0700); err != nil {
+		return err
+	}
+	for _, name := range []string{"auth.json", "sessions.json", "pids"} {
+		src := filepath.Join(baseDir(), name)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if err := os.Rename(src, filepath.Join(defaultDir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}

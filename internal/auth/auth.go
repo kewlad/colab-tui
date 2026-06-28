@@ -25,6 +25,7 @@ import (
 // Manager holds OAuth2 credentials and manages token lifecycle.
 type Manager struct {
 	RefreshToken string `json:"refresh_token"`
+	Email        string `json:"email,omitempty"` // account email, for display only
 	accessToken  string
 	tokenExpiry  time.Time
 	mu           sync.Mutex
@@ -163,6 +164,7 @@ func (m *Manager) Login(ctx context.Context) error {
 	m.RefreshToken = tokens.RefreshToken
 	m.accessToken = tokens.AccessToken
 	m.tokenExpiry = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
+	m.Email = fetchEmail(ctx, tokens.AccessToken) // best-effort, for display
 	m.mu.Unlock()
 
 	return m.Save()
@@ -246,6 +248,29 @@ func postToken(ctx context.Context, vals url.Values) (*tokenResponse, error) {
 		return nil, fmt.Errorf("auth: token error %s: %s", tok.Error, tok.ErrorDesc)
 	}
 	return &tok, nil
+}
+
+// fetchEmail looks up the account email via Google's userinfo endpoint.
+// Best-effort: returns "" on any error (the email is only used for display).
+func fetchEmail(ctx context.Context, accessToken string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://www.googleapis.com/oauth2/v3/userinfo", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var info struct {
+		Email string `json:"email"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&info) != nil {
+		return ""
+	}
+	return info.Email
 }
 
 func openBrowser(u string) error {
