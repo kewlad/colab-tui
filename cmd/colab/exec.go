@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -94,7 +95,8 @@ func newPythonCmd() *cobra.Command {
 executable, so there are no python-CLI args. Common mix-ups:
 
   colab python 'import torch; print(torch.cuda.is_available())'   # ✅ code
-  colab python -f train.py                                        # ✅ run a local .py file
+  colab python -f /content/train.py                               # ✅ run a file ON THE RUNTIME (runpy, __main__)
+  colab python -f ./train.py                                      # ✅ run a LOCAL file (read + send as a cell)
   colab exec 'pip install ultralytics'                            # ✅ pip / shell → use exec
   colab python -m pip install x   /   colab python pip install x  # ❌ that's the shell, use exec
 
@@ -119,11 +121,25 @@ A busy kernel keeps the runtime alive; --detach fires a long cell and returns.`,
 
 			var code string
 			if file != "" {
-				data, err := os.ReadFile(file)
-				if err != nil {
-					return fmt.Errorf("read file: %w", err)
+				if _, statErr := os.Stat(file); statErr == nil {
+					// Path exists on THIS machine → read it and send its contents
+					// as a cell.
+					data, err := os.ReadFile(file)
+					if err != nil {
+						return fmt.Errorf("read file: %w", err)
+					}
+					code = string(data)
+				} else {
+					// Not a local file → treat it as a path ON THE RUNTIME (the
+					// single-network workflow: `fs put`/`cp` then run it). Run it
+					// in the kernel with real `python script.py` semantics
+					// (__name__=="__main__", __file__ set) via runpy. A missing
+					// runtime path surfaces as a FileNotFoundError traceback.
+					lit, _ := json.Marshal(file)
+					// Bind the result (run_path returns the module globals dict) so
+					// IPython doesn't echo that whole dict as the cell's output.
+					code = fmt.Sprintf("import runpy as _runpy; _ = _runpy.run_path(%s, run_name=\"__main__\")", string(lit))
 				}
-				code = string(data)
 			} else if len(args) > 0 {
 				code = strings.Join(args, " ")
 			} else {
@@ -175,7 +191,7 @@ A busy kernel keeps the runtime alive; --detach fires a long cell and returns.`,
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
-	cmd.Flags().StringVarP(&file, "file", "f", "", "Run a local Python file instead of inline CODE")
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Run a Python file instead of inline CODE: a runtime path (e.g. /content/x.py) runs in the kernel via runpy; a local path is read + sent as a cell")
 	cmd.Flags().BoolVar(&noStream, "no-stream", false, "Buffer all output (don't stream)")
 	cmd.Flags().BoolVar(&detach, "detach", false, "Fire the cell and return; the kernel keeps running it (reap-safe way to launch a long job)")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "Timeout in seconds (0 = unlimited)")
@@ -205,7 +221,7 @@ func pythonMisuseHint(code string) string {
 		return fmt.Sprintf("hint: `colab python` runs Python CODE in the kernel, not the shell. For that command use:\n      colab exec %q", strings.TrimSpace(code))
 	}
 	if len(fields) == 1 && strings.HasSuffix(fields[0], ".py") {
-		return fmt.Sprintf("hint: `colab python` takes CODE, not a filename. To run a local file:  colab python -f %s", fields[0])
+		return fmt.Sprintf("hint: `colab python` takes CODE, not a filename. To run a file (local or on the runtime):  colab python -f %s", fields[0])
 	}
 	return ""
 }

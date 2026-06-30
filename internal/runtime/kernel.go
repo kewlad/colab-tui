@@ -281,7 +281,8 @@ func (k *Kernel) sendExecute(code string) (string, error) {
 // traceback is written to w before returning; otherwise the error is returned
 // without polluting w. This single loop backs both Execute and ExecuteStream.
 func (k *Kernel) runCell(code string, w io.Writer, timeout time.Duration, printTraceback bool) error {
-	if _, err := k.sendExecute(code); err != nil {
+	msgID, err := k.sendExecute(code)
+	if err != nil {
 		return err
 	}
 	k.setDeadline(timeout)
@@ -292,6 +293,15 @@ func (k *Kernel) runCell(code string, w io.Writer, timeout time.Duration, printT
 			return fmt.Errorf("kernel execute read: %w", err)
 		}
 		if k.handleColabRequest(resp) {
+			continue
+		}
+		// Only act on messages parented to OUR execute_request. The kernel's
+		// IOPub stream is shared — the keepalive daemon holds a connection open,
+		// other clients may be attached, and the connect handshake can leave a
+		// stale reply buffered. Without this filter runCell can return on a
+		// FOREIGN execute_reply and report success having run nothing (the ~1s
+		// silent no-op). ExecuteDetach/Attach already filter the same way.
+		if parentIDOf(resp) != msgID {
 			continue
 		}
 		content := contentOf(resp)

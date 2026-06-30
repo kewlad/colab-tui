@@ -192,7 +192,10 @@ func newStartCmd() *cobra.Command {
 }
 
 func newStopCmd() *cobra.Command {
-	var all bool
+	var (
+		all   bool
+		label string
+	)
 	cmd := &cobra.Command{
 		Use:   "stop [LABEL]",
 		Short: "Stop and unassign a runtime",
@@ -207,7 +210,9 @@ func newStopCmd() *cobra.Command {
 			if all {
 				sessions = store.List()
 			} else {
-				label := ""
+				// Accept the label as a positional arg OR --label, so `stop` matches
+				// the targeting of python/exec/health (--label) and avoids the
+				// "unknown flag: --label" footgun.
 				if len(args) > 0 {
 					label = args[0]
 				}
@@ -236,6 +241,7 @@ func newStopCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Stop all runtimes")
+	cmd.Flags().StringVar(&label, "label", "", "Runtime label (same as the positional [LABEL])")
 	return cmd
 }
 
