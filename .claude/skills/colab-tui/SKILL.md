@@ -60,6 +60,14 @@ or positional `[LABEL]` on `health`/`status`/`restart`/`stop`). Mutating command
 
 ## Running code
 
+**The kernel is the workhorse; `exec`/TTY is stateless shell glue — do the actual work in the kernel.**
+The kernel is the *only* channel that (1) keeps the runtime alive (busy cell = not reaped), (2) **persists
+state** — env vars, an HF/auth login, imported modules, loaded models all survive across `colab python`
+calls into the same kernel — and (3) is the deterministic channel (the TTY can wedge). Reserve `exec` for
+fast, throwaway shell: `pip install`, `ls`, `tail`, `ps`, file moves. **Anything stateful, long, or "the
+real job" goes through the kernel** — not `exec --bg` (that's a separate nohup shell: reap-blind past ~2.5 h
+*and* each invocation is a fresh process, so a login/env from one `--bg` does NOT carry to the next).
+
 **`colab python` runs Python CODE in the kernel — it is NOT the `python` binary.** No CLI args:
 `pip install …`, `python -m …`, or a bare `script.py` are **shell**, so use `colab exec` (or `python -f file`).
 The tool will redirect you if you slip.
@@ -69,9 +77,9 @@ The tool will redirect you if you slip.
 | Run a cell, see output | `colab python "<code>"` — reliable, keeps kernel busy |
 | Long job, don't block the turn | synchronous `colab python` under the Bash tool's `run_in_background:true` |
 | Fire-and-disconnect a long job | `colab python --detach` — reap-safe (kernel stays busy); returns once it confirms start |
-| Big / multi-statement code | stage a file (`fs put`/`cp`) → `colab python -f` (inline args >~10 KB jam the kernel) |
+| **Run a staged script** | `fs put`/`cp` it to the runtime → `colab python -f /content/x.py` — runs **in the kernel** via `runpy` with real `python x.py` semantics (`__main__`, `__file__`). A **local** path is instead read + sent as a cell. (inline code >~10 KB jams the kernel — stage it.) |
 | pip / shell command | `colab exec "pip install …"` (TTY; `--kernel` forces the robust channel) |
-| Detached shell job | `colab exec --bg "…" ` → `colab logs`. ⚠ outside the kernel → **reaped past ~2.5 h**; for long jobs use `python --detach` |
+| Detached shell job | `colab exec --bg "…" ` → `colab logs`. ⚠ outside the kernel → **reaped past ~2.5 h** AND no shared env/auth with other `--bg` shells; for long jobs use `python --detach` |
 
 **Don't queue cells:** a second `colab python` blocks behind a busy cell. Monitor via a separate channel —
 `colab exec "tail …"` (TTY is independent of the kernel) or, better, local `rclone` on gdrive checkpoints.
@@ -137,6 +145,12 @@ fresh + resume from checkpoint.
   slow/high-capacity configs.
 - Not an abuse risk — first-party-sanctioned protocol; the only real limit on Pro is the ~2-concurrent-GPU
   cap (HTTP 412, a throttle, not a strike).
+- **Tier matters for concurrency + reaps (firsthand 2026-06-28):** **Pro = ~2 concurrent GPUs; Free = 1**
+  (2nd `start` on a Free profile → HTTP 412 every time, not transient), and Free reaps more aggressively.
+  `colab quota` shows `Tier: Free|Pro`. When an account's free CCU is spent, GPU `start` returns **503**
+  (vs 412 for the concurrency cap) — that account is done until its `Next refill`. The refill **amount**
+  isn't shown beforehand (the balance you see mid-day is *remaining*, not the daily cap) — read `colab
+  quota` right after the refill to learn the real new balance; don't guess it for ETAs.
 
 **Multiple Google accounts (profiles).** Each profile is an isolated config tree (own token, sessions,
 keepalive daemons) under `~/.config/colab-tui/profiles/<name>/`, so different accounts run in parallel —
@@ -151,6 +165,13 @@ COLAB_PROFILE=work colab list        # env form (one-off override for a shell se
 ```
 A profile appears in `profile list` only after its first `auth login`. Your pre-existing single-account
 setup is auto-migrated into `default` on first run — nothing to do.
+
+**Extend free quota by switching accounts.** When one account's free CCU exhausts mid-job, switch to
+another profile and resume — `rclone` remotes and S3/boto3 creds are **account-independent** (set on the
+runtime via `--rclone`/staged secret, not tied to the Colab Google account), so a checkpoint+resume job
+picks up exactly where it stopped on the new account. Recompute the remaining work-list from the gdrive
+checkpoints (skip done) and launch on `--profile <other>`. (2026-06-28: a 633-video job exhausted one Pro
+account at 295, resumed the remaining 338 on a Free account's fresh 6 CCU — same gdrive checkpoint dir.)
 
 ## Improving the tool
 

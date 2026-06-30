@@ -18,16 +18,13 @@ Format: `## YYYY-MM-DD — short title`, newest first.
 
 ---
 
-## 2026-06-28 — `colab quota` Free balance IS a hard budget; at ~0 (no paid units) runtimes DIE (FIRSTHAND)
-`colab quota` accurately reflects free-vs-paid: this account is Pro with **0 paid units**, running purely
-on the daily free CCU allotment. OBSERVED today: free fell 5.16→…→0.07 and **both T4s were torn down**
-(`colab list` → No active runtimes) — a 633-video job stopped at 295. So the Free balance is a REAL budget,
-not advisory: when it reaches ~0 with no paid units, active GPUs stop. (Earlier I'd noted a user belief
-that "0 lets you keep going" — that did NOT hold here.) **For ETA on a long GPU job: treat free CCU as a
-hard cap** — `remaining_CCU / burn_rate` = runtime left; if the job needs more, plan a refill-resume
-(free refills at the `Next refill` time in `colab quota`) or add paid units. **Refill AMOUNT is unknown —
-do NOT guess it; read `colab quota` right AFTER the refill to get the real new balance** (today's 5.16 was
-the *remaining* balance mid-day, not a confirmed daily cap). Always checkpoint+resume-skip so a
-quota-death loses nothing (per-unit gdrive checkpoints).
+## 2026-06-28 — boto3 NOT always pre-installed on fresh runtimes (contradicts SKILL.md)
+
+SKILL.md's "Fresh-runtime gotchas" lists `boto3` as present, but a fresh **europe-west4 T4** (a Pro account)
+had **no boto3** — a SAM3 S3-pull job died `ModuleNotFoundError: No module named 'boto3'` until
+`colab exec "pip install -q boto3"` (~10s). May vary by runtime image/region. If a run needs S3, install
+boto3 defensively first rather than assuming it. (Promote to SKILL.md if it recurs across regions.)
+Also confirmed present on that image: torch 2.11/cu128, **transformers 5.12 with full SAM3** (`Sam3Model`/
+`Sam3Processor`), cv2. SAM3 gated weights load fine once `~/.cache/huggingface/token` is written.
 
 <!-- Add un-promoted observations above this line. (Currently empty — all learnings are in SKILL.md / CLAUDE.md.) -->
