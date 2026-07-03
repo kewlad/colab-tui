@@ -9,8 +9,23 @@ import (
 	"time"
 
 	"github.com/netanelbi/colab-tui/internal/runtime"
+	"github.com/netanelbi/colab-tui/internal/session"
 	"github.com/spf13/cobra"
 )
+
+// rejectPositionalLabel guards python/exec against the positional-label mistake:
+// their positional args ARE the code/command (joined with spaces), so
+// `colab python mylabel "print(1)"` silently mashes the label into the cell and
+// the kernel runs garbage ("SyntaxError: invalid syntax" on line 1). Positional
+// labels exist only on health/status/restart/stop — here they must be rejected,
+// never executed.
+func rejectPositionalLabel(store *session.Store, cmdName, argName string, args []string) error {
+	if len(args) == 0 || store.GetByLabel(args[0]) == nil {
+		return nil
+	}
+	return fmt.Errorf("%q is a runtime label, but `colab %s` takes no positional label — it would be mashed into the %s and corrupt it.\nUse the flag instead:  colab %s --label %s '<%s>'",
+		args[0], cmdName, argName, cmdName, args[0], argName)
+}
 
 func newExecCmd() *cobra.Command {
 	var (
@@ -26,6 +41,9 @@ func newExecCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, store, err := loadAuthAndStore()
 			if err != nil {
+				return err
+			}
+			if err := rejectPositionalLabel(store, "exec", "command", args); err != nil {
 				return err
 			}
 			s, err := resolveSession(store, label)
@@ -111,6 +129,9 @@ A busy kernel keeps the runtime alive; --detach fires a long cell and returns.`,
 			}
 			_, store, err := loadAuthAndStore()
 			if err != nil {
+				return err
+			}
+			if err := rejectPositionalLabel(store, "python", "code", args); err != nil {
 				return err
 			}
 			s, err := resolveSession(store, label)

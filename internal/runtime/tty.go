@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +13,22 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/netanelbi/colab-tui/internal/config"
 )
+
+// cmdTimeoutErr builds the error for a command that produced output but ran past
+// the caller's timeout. This is NOT a TTY wedge (the terminal was demonstrably
+// working), so the message deliberately avoids the isTTYWedge markers — the
+// exec fallback must not re-run a command that already partially executed.
+func cmdTimeoutErr(timeout time.Duration) error {
+	return fmt.Errorf("command still running after --timeout %s — it is likely killed as this TTY session closes; "+
+		"raise --timeout, or use `colab exec --bg` / `colab python --detach` for long jobs", timeout)
+}
+
+// isReadTimeout reports whether a websocket read error is a deadline expiry (as
+// opposed to a closed/failed connection).
+func isReadTimeout(err error) bool {
+	ne, ok := err.(net.Error)
+	return ok && ne.Timeout()
+}
 
 // wrapCommand builds the tty input line for a synchronous Exec/ExecStream.
 // The user command is base64-encoded and run inside its OWN bash subshell so
@@ -103,6 +120,11 @@ func (t *TTY) Exec(cmd string, timeout time.Duration) (string, error) {
 	for {
 		var msg ttyMsg
 		if err := t.conn.ReadJSON(&msg); err != nil {
+			// If the TTY already echoed our command back, the terminal is alive
+			// and a deadline expiry means the COMMAND outlived the timeout.
+			if isReadTimeout(err) && strings.Count(StripAnsi(buf.String()), startMarker) >= 1 {
+				return "", cmdTimeoutErr(timeout)
+			}
 			return "", fmt.Errorf("tty exec read: %w", err)
 		}
 		buf.WriteString(msg.Data)
@@ -176,6 +198,12 @@ func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
 	for {
 		var msg ttyMsg
 		if err := t.conn.ReadJSON(&msg); err != nil {
+			// Same distinction as Exec: an echoed command proves the TTY works,
+			// so a deadline expiry is the command outliving the timeout — not a
+			// wedge to fall back (and re-run the command!) on.
+			if isReadTimeout(err) && (started || startCount >= 1) {
+				return cmdTimeoutErr(timeout)
+			}
 			return fmt.Errorf("tty stream read: %w", err)
 		}
 		chunk := StripAnsi(msg.Data)

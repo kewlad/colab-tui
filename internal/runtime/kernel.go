@@ -44,7 +44,25 @@ type kernelInfo struct {
 
 // kernelGet performs an authenticated GET against the runtime's Jupyter REST API
 // and unmarshals the JSON response into out. path is appended to baseURL.
+// Failures are retried with a short backoff: the Colab proxy flakes (5xx, empty
+// bodies) exactly when a runtime is being recycled, and a one-shot failure here
+// used to surface as a bare "unexpected end of JSON input" that broke exec's
+// kernel fallback mid-command.
 func kernelGet(baseURL, token, path string, out interface{}) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 750 * time.Millisecond)
+		}
+		lastErr = kernelGetOnce(baseURL, token, path, out)
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
+}
+
+func kernelGetOnce(baseURL, token, path string, out interface{}) error {
 	url := strings.TrimRight(baseURL, "/") + path
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -63,10 +81,20 @@ func kernelGet(baseURL, token, path string, out interface{}) error {
 	if err != nil {
 		return err
 	}
+	if resp.StatusCode >= 400 {
+		snippet := strings.TrimSpace(string(body))
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet)
+	}
 	if out == nil {
 		return nil
 	}
-	return json.Unmarshal(body, out)
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("parse response (HTTP %d, %d bytes): %w", resp.StatusCode, len(body), err)
+	}
+	return nil
 }
 
 // dialChannel opens the kernel's channel WebSocket (session_id is required by the
@@ -96,7 +124,7 @@ func NewKernel(baseURL, token, label string) (*Kernel, error) {
 		// try — never spawn a duplicate session. That accumulation is exactly
 		// the "spam" seen in Colab's Active Sessions panel.
 		if !errors.Is(err, ErrNoKernels) {
-			return nil, fmt.Errorf("kernel list: %w", err)
+			return nil, err // already wrapped "kernel list: ..." by FirstKernelState
 		}
 		kernelID, err = CreateSession(baseURL, token, label)
 		if err != nil {
@@ -287,9 +315,25 @@ func (k *Kernel) runCell(code string, w io.Writer, timeout time.Duration, printT
 	}
 	k.setDeadline(timeout)
 
-	for {
+	// A cell is finished only when BOTH the shell-channel execute_reply AND the
+	// IOPub idle status (parented to our request) have arrived. The two channels
+	// are independent through the Colab proxy, so the reply can beat trailing
+	// stream output — returning on the reply alone intermittently DROPPED the
+	// cell's stdout ("completed but no output"). Once either terminal message is
+	// in, a short rolling grace deadline bounds the wait for the rest, and a
+	// timeout past that point counts as done rather than an error.
+	const grace = 3 * time.Second
+	var execErr error
+	gotReply, gotIdle := false, false
+	for !(gotReply && gotIdle) {
+		if gotReply || gotIdle {
+			k.conn.SetReadDeadline(time.Now().Add(grace))
+		}
 		var resp map[string]interface{}
 		if err := k.conn.ReadJSON(&resp); err != nil {
+			if gotReply || gotIdle {
+				return execErr
+			}
 			return fmt.Errorf("kernel execute read: %w", err)
 		}
 		if k.handleColabRequest(resp) {
@@ -328,11 +372,23 @@ func (k *Kernel) runCell(code string, w io.Writer, timeout time.Duration, printT
 			}
 			ename, _ := content["ename"].(string)
 			evalue, _ := content["evalue"].(string)
-			return fmt.Errorf("kernel error %s: %s", ename, evalue)
+			execErr = fmt.Errorf("kernel error %s: %s", ename, evalue)
 		case "execute_reply":
-			return nil
+			gotReply = true
+			// Belt-and-suspenders: if the IOPub error message was lost, the
+			// reply itself still carries the failure.
+			if status, _ := content["status"].(string); status == "error" && execErr == nil {
+				ename, _ := content["ename"].(string)
+				evalue, _ := content["evalue"].(string)
+				execErr = fmt.Errorf("kernel error %s: %s", ename, evalue)
+			}
+		case "status":
+			if state, _ := content["execution_state"].(string); state == "idle" {
+				gotIdle = true
+			}
 		}
 	}
+	return execErr
 }
 
 func (k *Kernel) setDeadline(timeout time.Duration) {

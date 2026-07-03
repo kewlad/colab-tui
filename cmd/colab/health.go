@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +39,11 @@ func healthProbeCode() string {
 print("HOST", socket.gethostname())
 print("SENTINEL", os.path.exists(%q))
 print("CONTENTN", len(os.listdir("/content")) if os.path.isdir("/content") else -1)
+try:
+    m = dict((l.split(":")[0], int(l.split(":")[1].split()[0])) for l in open("/proc/meminfo"))
+    print("RAM", m["MemTotal"] - m["MemAvailable"], m["MemTotal"])
+except Exception:
+    pass
 try:
     g = subprocess.run(["nvidia-smi","--query-gpu=name,memory.used,memory.total","--format=csv,noheader"],
                        capture_output=True, text=True, timeout=10).stdout.strip()
@@ -103,6 +110,16 @@ colab_kernel'.`,
 			// sentinel detect a recycle behind a still-assigned endpoint.
 			_, state, err := runtime.FirstKernelState(s.BaseURL, s.Token)
 			if err != nil {
+				// "The runtime says it has no kernels" and "the runtime isn't
+				// answering" are different verdicts: the latter is what a
+				// mid-recycle / crashed VM looks like — don't call it DOWN yet.
+				if !errors.Is(err, runtime.ErrNoKernels) {
+					fmt.Printf("Kernel:      UNREACHABLE (%v)\n", err)
+					fmt.Printf("\nVERDICT: UNKNOWN — endpoint is assigned but the Jupyter API isn't answering\n")
+					fmt.Printf("(proxy blip, or the VM crashed/is being recycled). Re-run `colab health` in ~30s;\n")
+					fmt.Printf("if it persists: colab resume, or start fresh.\n")
+					return nil
+				}
 				fmt.Printf("Kernel:      NONE\n")
 				fmt.Printf("\nVERDICT: DOWN — assigned but no kernel reachable (container recycled or\n")
 				fmt.Printf("never started). Run: colab resume, or start fresh.\n")
@@ -138,7 +155,13 @@ colab_kernel'.`,
 			p := parseProbe(out)
 			fmt.Printf("Host:        %s\n", p["HOST"])
 			fmt.Printf("GPU:         %s\n", p["GPU"])
+			if ram := formatRAM(p["RAM"]); ram != "" {
+				fmt.Printf("RAM:         %s\n", ram)
+			}
 			fmt.Printf("/content:    %s files\n", p["CONTENTN"])
+			for _, warn := range memoryWarnings(p["RAM"], p["GPU"]) {
+				fmt.Printf("WARNING:     %s\n", warn)
+			}
 
 			sentinelPresent := p["SENTINEL"] == "True"
 			fmt.Println()
@@ -185,6 +208,53 @@ func assignmentFor(client *api.Client, endpoint string) (api.Assignment, bool) {
 		}
 	}
 	return api.Assignment{}, false
+}
+
+// formatRAM turns the probe's "usedKiB totalKiB" into a human line, or "" if the
+// probe didn't report RAM.
+func formatRAM(ram string) string {
+	used, total, ok := parseRAM(ram)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%.1f/%.1f GB used (%d%%)", used, total, int(used/total*100))
+}
+
+// parseRAM parses "usedKiB totalKiB" into GB values.
+func parseRAM(ram string) (usedGB, totalGB float64, ok bool) {
+	parts := strings.Fields(ram)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	used, err1 := strconv.ParseFloat(parts[0], 64)
+	total, err2 := strconv.ParseFloat(parts[1], 64)
+	if err1 != nil || err2 != nil || total <= 0 {
+		return 0, 0, false
+	}
+	return used / 1024 / 1024, total / 1024 / 1024, true
+}
+
+// memoryWarnings flags RAM / GPU-memory pressure above 90%. This matters more on
+// Colab than elsewhere: an OOM doesn't fail politely — it kills the VM, and Colab
+// silently swaps a FRESH blank one behind the same endpoint (/content wiped,
+// packages gone). health can't predict that after the fact, but it can warn
+// while there's still time to checkpoint.
+func memoryWarnings(ram, gpu string) []string {
+	var warns []string
+	if used, total, ok := parseRAM(ram); ok && used/total >= 0.9 {
+		warns = append(warns, fmt.Sprintf("RAM %d%% used (%.1f/%.1f GB) — an OOM kills the VM and Colab replaces it "+
+			"with a fresh blank one (/content wiped). Checkpoint to gdrive before allocating more.", int(used/total*100), used, total))
+	}
+	// GPU probe line: "Tesla T4, 13000 MiB, 15360 MiB" (name, memory.used, memory.total)
+	if parts := strings.Split(gpu, ","); len(parts) >= 3 {
+		used, err1 := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[len(parts)-2]), "MiB")), 64)
+		total, err2 := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[len(parts)-1]), "MiB")), 64)
+		if err1 == nil && err2 == nil && total > 0 && used/total >= 0.9 {
+			warns = append(warns, fmt.Sprintf("GPU memory %d%% used (%.0f/%.0f MiB) — a CUDA OOM can crash the kernel; "+
+				"free models (del + torch.cuda.empty_cache()) or colab restart before loading more.", int(used/total*100), used, total))
+		}
+	}
+	return warns
 }
 
 // parseProbe turns the "KEY value" lines of the probe output into a map.

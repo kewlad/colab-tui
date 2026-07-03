@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // withTestClient points the package httpClient at a test server for the duration
@@ -94,6 +97,104 @@ func TestCreateSession_DeterministicPath(t *testing.T) {
 	}
 	if other := captureCreateSessionPath(t, "v16b"); other == p1 {
 		t.Fatalf("different labels collided on path %q", p1)
+	}
+}
+
+// wsKernel spawns a fake kernel-channel websocket server. handler receives the
+// connection after the client's first message (the execute_request) has been
+// read, along with that request's msg_id.
+func wsKernel(t *testing.T, handler func(conn *websocket.Conn, msgID string)) *Kernel {
+	t.Helper()
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req map[string]interface{}
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+		hdr, _ := req["header"].(map[string]interface{})
+		msgID, _ := hdr["msg_id"].(string)
+		handler(conn, msgID)
+	}))
+	t.Cleanup(srv.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial test ws: %v", err)
+	}
+	k := &Kernel{conn: conn, kernelID: "k1", sessionID: "s1", baseURL: srv.URL, token: "tok"}
+	t.Cleanup(func() { k.Close() })
+	return k
+}
+
+// iopubMsg builds a minimal inbound kernel message parented to msgID.
+func iopubMsg(msgType, parentID string, content map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"header":        map[string]interface{}{"msg_type": msgType},
+		"parent_header": map[string]interface{}{"msg_id": parentID},
+		"content":       content,
+	}
+}
+
+// TestExecute_CapturesStreamArrivingAfterReply is the regression test for the
+// "cell completed but printed nothing" bug: the shell-channel execute_reply and
+// the IOPub stream are independent through the Colab proxy, so the reply can
+// arrive FIRST. runCell must keep reading until idle instead of returning on the
+// reply and dropping the output.
+func TestExecute_CapturesStreamArrivingAfterReply(t *testing.T) {
+	k := wsKernel(t, func(conn *websocket.Conn, msgID string) {
+		_ = conn.WriteJSON(iopubMsg("execute_reply", msgID, map[string]interface{}{"status": "ok"}))
+		_ = conn.WriteJSON(iopubMsg("stream", msgID, map[string]interface{}{"name": "stdout", "text": "hello\n"}))
+		_ = conn.WriteJSON(iopubMsg("status", msgID, map[string]interface{}{"execution_state": "idle"}))
+	})
+	out, err := k.Execute("print('hello')", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if out != "hello\n" {
+		t.Fatalf("got output %q, want %q (stream after reply was dropped)", out, "hello\n")
+	}
+}
+
+// TestExecute_ReplyWithoutIdleFinishesViaGrace: if the idle status never arrives
+// (lost through the proxy), a completed cell must still return successfully after
+// the short grace window — not surface a read-timeout error.
+func TestExecute_ReplyWithoutIdleFinishesViaGrace(t *testing.T) {
+	k := wsKernel(t, func(conn *websocket.Conn, msgID string) {
+		_ = conn.WriteJSON(iopubMsg("stream", msgID, map[string]interface{}{"name": "stdout", "text": "done\n"}))
+		_ = conn.WriteJSON(iopubMsg("execute_reply", msgID, map[string]interface{}{"status": "ok"}))
+		time.Sleep(10 * time.Second) // never send idle; hold the conn open
+	})
+	out, err := k.Execute("print('done')", 30*time.Second)
+	if err != nil {
+		t.Fatalf("Execute: %v (a lost idle must not fail a completed cell)", err)
+	}
+	if out != "done\n" {
+		t.Fatalf("got output %q, want %q", out, "done\n")
+	}
+}
+
+// TestExecute_IgnoresForeignMessages re-pins the parent-msg-id filter: replies
+// and streams from OTHER clients on the shared kernel must not terminate or
+// pollute our cell.
+func TestExecute_IgnoresForeignMessages(t *testing.T) {
+	k := wsKernel(t, func(conn *websocket.Conn, msgID string) {
+		_ = conn.WriteJSON(iopubMsg("execute_reply", "someone-else", map[string]interface{}{"status": "ok"}))
+		_ = conn.WriteJSON(iopubMsg("stream", "someone-else", map[string]interface{}{"text": "noise\n"}))
+		_ = conn.WriteJSON(iopubMsg("stream", msgID, map[string]interface{}{"text": "mine\n"}))
+		_ = conn.WriteJSON(iopubMsg("execute_reply", msgID, map[string]interface{}{"status": "ok"}))
+		_ = conn.WriteJSON(iopubMsg("status", msgID, map[string]interface{}{"execution_state": "idle"}))
+	})
+	out, err := k.Execute("print('mine')", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if out != "mine\n" {
+		t.Fatalf("got output %q, want %q", out, "mine\n")
 	}
 }
 

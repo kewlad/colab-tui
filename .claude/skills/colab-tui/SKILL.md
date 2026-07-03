@@ -31,8 +31,10 @@ even a fresh runtime in minutes.
 ## Status commands (use these, don't hand-decode `ps`)
 
 - `colab health [label]` — one-call verdict: keepalive, token TTL, **server-side assignment** (is it
-  still yours?), kernel busy/idle, `/content` reap sentinel, GPU → **ALIVE & IDLE / ALIVE & BUSY /
-  REAPED / DOWN**.
+  still yours?), kernel busy/idle, `/content` reap sentinel, GPU + RAM → **ALIVE & IDLE / ALIVE & BUSY /
+  REAPED / DOWN / UNKNOWN** (UNKNOWN = assigned but Jupyter unreachable — mid-recycle or proxy blip;
+  re-check in ~30s). **Warns at ≥90% RAM/GPU-memory** — heed it: an OOM doesn't error, it kills the VM
+  and Colab silently swaps in a fresh blank one (/content wiped). Checkpoint before loading more.
 - `colab list` — reconciled with the server; lists every assigned runtime + resources, prunes STALE
   local entries.
 - `colab quota` — compute-unit balance, burn rate, runway, per-runtime attribution. Check before a long GPU job.
@@ -51,7 +53,9 @@ colab stop --label myrun                            # release the slot when done
 ```
 
 **Targeting:** one runtime → used automatically; **several → commands refuse to guess** (pass `--label`,
-or positional `[LABEL]` on `health`/`status`/`restart`/`stop`). Mutating commands echo `[label]` to stderr.
+or positional `[LABEL]` on `health`/`status`/`restart`/`stop`). `python`/`exec` take only CODE/COMMAND
+positionally and **reject a positional label** (it would be joined into the cell/command and corrupt it) —
+always use `--label` there. Mutating commands echo `[label]` to stderr.
 
 **Browser-free:** `start` (even `--gpu`/`--rclone`), `python`, `exec`, `fs`, `cp`, `rclone setup/mount`,
 `list/status/health/quota/resources/ps/logs/resume/restart/attach/stop`.
@@ -110,6 +114,9 @@ fresh + resume from checkpoint.
   variables). `colab restart` is the harder reset (kills the kernel, frees GPU). Note: Ctrl-C in
   `watch --stream`/`attach` only detaches the *viewer* — the cell keeps running; use `interrupt` to stop it.
 - `websocket: bad handshake`/`1006` → stale proxy: `colab resume --label X` (headless), or use `colab python`.
+- `exec`: `command still running after --timeout Ns` → the command outlived the timeout (default 300s), NOT
+  a TTY wedge — it was not re-run, and it likely dies with the TTY session. Raise `--timeout`, or run long
+  shell work via `--bg` / the kernel (`python --detach`).
 - `colab start` **HTTP 412** → ~2-concurrent-GPU cap; free a slot, start sequentially (parallel `start` 412s).
 - Repeated rapid reaps on a *fresh* runtime → heavy-use **throttling**; wait it out or fall back to local.
 - Stale keepalive after manual churn: `pkill -f 'colab keepalive'` before `colab start`.

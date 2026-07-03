@@ -106,4 +106,13 @@ Key findings from reverse engineering:
 - Drive mounting requires one-time browser consent via `colab drive auth` (same as VS Code extension). After consent, `colab drive mount` and `colab start --gdrive` work automatically
 - **(FIXED 2026-06-26)** keep-alive now holds a kernel WS open and only pings while held (was: unconditional ping); `v1/*` calls now go to `colabGapiDomain` (was: everything via `colabDomain`)
 - NOT live-verified yet: the GAPI-domain switch and the connection-holding keepalive are correct against upstream source but want a real multi-hour runtime smoke test
+- **(FIXED 2026-07-03, live-verified)** Four fixes from agent field feedback: (1) `python`/`exec` now REJECT a positional
+  first arg that matches a runtime label (was: `colab python obgyn "<code>"` joined the label into the cell → SyntaxError,
+  reported as success). (2) `runCell` now finishes on **execute_reply AND IOPub idle** (with a 3s rolling grace if one is
+  lost) — the shell reply could beat trailing IOPub `stream` messages through the Colab proxy, intermittently dropping the
+  cell's stdout; reply-status errors are also surfaced now. (3) `kernelGet` checks HTTP status + retries ×3 (was: a proxy
+  5xx/empty body surfaced as `unexpected end of JSON input`, breaking exec's kernel fallback), and a TTY read **timeout
+  after the command echoed** is reported as "command still running after --timeout" instead of a wedge — previously the
+  fallback would RE-RUN the half-executed command via the kernel. (4) `health` reports RAM, warns at ≥90% RAM/GPU-memory
+  (OOM kills the VM → silent fresh-VM swap), and distinguishes UNKNOWN (Jupyter unreachable, mid-recycle) from DOWN.
 - **(FIXED 2026-06-30, live-verified)** `runCell` (backs `python`/`exec --kernel`) now filters inbound messages by parent `msg_id` (was: returned on the first `execute_reply` of ANY msg → on a shared kernel, e.g. with the keepalive connection held, it could report success having run nothing — the ~1s silent no-op). `colab python -f` now runs a **runtime** path in the kernel via `_runpy.run_path(run_name="__main__")` (bound to `_` so the returned globals dict isn't echoed) and only reads-and-sends when the path exists locally (was: local-only `os.ReadFile`, so staged `/content/x.py` errored). A missing runtime path surfaces as a `FileNotFoundError` traceback. `colab stop` now also accepts `--label`. Smoke-tested on a live DEFAULT runtime: runtime-path runpy (`__main__`/`__file__` correct, streamed), local fallback, env-persists-across-calls, missing-path error, `stop --label`.
