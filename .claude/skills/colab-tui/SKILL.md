@@ -72,6 +72,13 @@ fast, throwaway shell: `pip install`, `ls`, `tail`, `ps`, file moves. **Anything
 real job" goes through the kernel** — not `exec --bg` (that's a separate nohup shell: reap-blind past ~2.5 h
 *and* each invocation is a fresh process, so a login/env from one `--bg` does NOT carry to the next).
 
+⚠ **That persistence cuts both ways: a smoke test's `os.environ` leaks into the production launch.**
+Setting `NSHARD`/`SHARD`/`OUT` (or any knob) to test on a few items leaves them set for the *next* cell,
+so the "full" run silently processes the test slice and exits looking successful. **Explicitly reset every
+env knob in the launch cell** (`for k in (...): os.environ.pop(k, None)`, then set what you mean) and
+**assert the scale in the first log line** — e.g. print `shard 0/1` + `frames to process: N` and check N is
+the whole corpus before walking away. Same trap for a stale module import or a model left on the GPU.
+
 **`colab python` runs Python CODE in the kernel — it is NOT the `python` binary.** No CLI args:
 `pip install …`, `python -m …`, or a bare `script.py` are **shell**, so use `colab exec` (or `python -f file`).
 The tool will redirect you if you slip.
@@ -131,6 +138,17 @@ fresh + resume from checkpoint.
 - `colab cp SRC DST` = `rclone copy` on the runtime. Trailing-slash the dest dir (`remote:dir/`) or rclone
   may create a *file-named directory*.
 - **Many small files are Drive-throttled to a crawl** → tar into ONE file, transfer, untar on the box.
+  Check whether a tar already exists next to the data before copying a directory — a 2,420-file label set
+  shipped as one 8 MB `labels.tar` in seconds after the loose-file copy had wedged for 20 min.
+- ⚠ **Run bulk `rclone` FROM THE KERNEL, not `exec --bg`.** A `--bg` shell dies with its TTY session, and
+  a multi-step chain (`images ; labels ; meta`) then stops **silently mid-way** — the big first step looks
+  like success while the later ones never ran and nothing reports an error. Not a reap; this happened at
+  ~20 min. The kernel also keeps the runtime alive while it transfers. If a copy must be chained, log each
+  step's `rc` to a file you can `fs cat`.
+- ⚠ **The local gdrive FUSE mount is not a bulk read source** — ~1.1 s/file, and 1,470 small label files
+  timed out at 10 min while a Colab job was checkpointing to Drive (they compete). ⇒ **build inputs on a
+  runtime that already holds the data** rather than assembling them locally and uploading. Fuse is fine
+  for a handful of files (listings, a few CSVs), never for a corpus.
 - gdrive hygiene: persistent/reusable/Colab-readable data only, **not scratch**; one-off intermediates →
   local. Default account = `mydrive`.
 
