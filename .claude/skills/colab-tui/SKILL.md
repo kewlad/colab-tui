@@ -78,6 +78,11 @@ so the "full" run silently processes the test slice and exits looking successful
 env knob in the launch cell** (`for k in (...): os.environ.pop(k, None)`, then set what you mean) and
 **assert the scale in the first log line** — e.g. print `shard 0/1` + `frames to process: N` and check N is
 the whole corpus before walking away. Same trap for a stale module import or a model left on the GPU.
+⛔ **In particular: `os.environ.setdefault` in a launch cell is a bug, not a default.** It is the right
+idiom for a fresh process and the wrong one for a long-lived kernel — the second launch inherits the
+first's values in silence. A run configured for 5.5 h and batch 8 announced *"Starting training for
+8.0 hours"* at batch 4 for exactly this reason. **Assign (`os.environ[k] = v`), then print what you
+set** so the log carries the config it actually ran with.
 
 **`colab python` runs Python CODE in the kernel — it is NOT the `python` binary.** No CLI args:
 `pip install …`, `python -m …`, or a bare `script.py` are **shell**, so use `colab exec` (or `python -f file`).
