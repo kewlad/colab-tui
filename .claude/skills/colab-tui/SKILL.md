@@ -97,6 +97,14 @@ The tool will redirect you if you slip.
 | pip / shell command | `colab exec "pip install …"` (TTY; `--kernel` forces the robust channel) |
 | Detached shell job | `colab exec --bg "…" ` → `colab logs`. ⚠ outside the kernel → **reaped past ~2.5 h** AND no shared env/auth with other `--bg` shells; for long jobs use `python --detach` |
 
+⛔ **`colab exec` ALWAYS EXITS 0** — the remote command's exit status is not propagated. Verified
+2026-08-10: `exit 7`, `false` and `true` all return rc=0 locally. So **`colab exec` cannot be used as
+a condition**: `until colab exec "grep -q DONE log"; do sleep 60; done` exits on its first iteration
+and looks like the condition was met. Test the remote result on the **content** instead — have the
+command print something and grep the local output, or better, poll a gdrive checkpoint with local
+`rclone`, which is content-based and cannot lie about it.
+*(Tool bug, not a design choice — worth fixing in the Go `exec` path so it returns the remote status.)*
+
 **Don't queue cells:** a second `colab python` blocks behind a busy cell. Monitor via a separate channel —
 `colab exec "tail …"` (TTY is independent of the kernel) or, better, local `rclone` on gdrive checkpoints.
 Reserve `colab python` for launching, never mid-run polling.
