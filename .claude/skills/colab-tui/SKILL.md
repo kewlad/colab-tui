@@ -202,6 +202,18 @@ fresh + resume from checkpoint.
   streams single-network; `fs` round-trips bytes through your machine).
 - `colab cp SRC DST` = `rclone copy` on the runtime. Trailing-slash the dest dir (`remote:dir/`) or rclone
   may create a *file-named directory*.
+- ⛔ **VERIFY AN ARCHIVE BY READING ITS CONTENT BACK OUT, NEVER BY SIZE OR `tar -tf`.** Both lie. A
+  stale tar left by a killed re-tar had a plausible byte count and `tar -tf` exited 0, but the
+  `build_stats.json` *inside* it reported the previous build's totals — it would have trained the
+  wrong labels. `tar -xOf archive.tar path/to/manifest.json` and assert on a number that changes
+  when the data changes (an instance count, a config hash). Do the same after upload, from the
+  remote copy. ⚠ And beware self-matching `pkill` patterns: `pkill -f "foo.tar"` run from a shell
+  whose own command line contains `foo.tar` kills that shell — which is how the stale tar survived.
+- ⛔ **Re-stage with `rclone copyto`, never `rclone delete && rclone copy`.** The delete-then-copy
+  pair has a window where the delete has landed and the copy has not, and *any* interruption in it
+  (a tool timeout backgrounding the command, a network blip) leaves the path EMPTY. No timeout
+  setting closes the window; overwrite-in-place has none. Seen live: a shared dataset path empty for
+  ~10 minutes because the copy half died.
 - **Many small files are Drive-throttled to a crawl** → tar into ONE file, transfer, untar on the box.
   Check whether a tar already exists next to the data before copying a directory — a 2,420-file label set
   shipped as one 8 MB `labels.tar` in seconds after the loose-file copy had wedged for 20 min.
