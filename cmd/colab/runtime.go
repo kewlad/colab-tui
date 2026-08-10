@@ -225,9 +225,17 @@ func newStopCmd() *cobra.Command {
 
 			for _, s := range sessions {
 				fmt.Printf("Stopping %s (endpoint: %s)...\n", s.Label, s.Endpoint)
-				// Kill keepalive
-				if s.KeepalivePID > 0 {
-					if proc, err := os.FindProcess(s.KeepalivePID); err == nil {
+				// Kill keepalive. Prefer the PID FILE over the session store: the
+				// store records whoever spawned first, so after a `colab resume`
+				// (or any daemon relaunch) it names a dead — possibly recycled —
+				// PID, which both signals the wrong process and leaves the real
+				// daemon running.
+				pid := s.KeepalivePID
+				if p, err := session.ReadPID(s.Endpoint); err == nil {
+					pid = p
+				}
+				if pid > 0 {
+					if proc, err := os.FindProcess(pid); err == nil {
 						proc.Signal(syscall.SIGTERM)
 					}
 				}

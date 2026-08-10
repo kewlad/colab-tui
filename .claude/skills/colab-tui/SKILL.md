@@ -22,7 +22,9 @@ leaving a *fresh blank VM behind the same endpoint* — `colab exec` still "work
 invisible to Colab's tracker → reaped.
 
 `colab start` runs a keepalive daemon that **holds a kernel WebSocket open** (mimics VS Code — Colab
-won't reap a runtime with an attached client), pings every 5 min, refreshes the proxy token, and
+won't reap a runtime with an attached client), sends the tunnel keep-alive ping every 5 min
+**unconditionally** (since 2026-08-10 — the ping is what refreshes the idle timer and needs no kernel,
+so a proxy blip or wedged kernel no longer silently stops it), refreshes the proxy token, and
 re-checks the assignment each cycle (self-exits + cleans up when the runtime is gone). This extends an
 *idle-but-wanted* runtime but does **not** beat the hard reap forever. So: run long work in a **busy
 kernel cell**, and make every run **reap-resilient** (checkpoint + resume-skip) — throttling can reap
@@ -57,7 +59,7 @@ or positional `[LABEL]` on `health`/`status`/`restart`/`stop`). `python`/`exec` 
 positionally and **reject a positional label** (it would be joined into the cell/command and corrupt it) —
 always use `--label` there. Mutating commands echo `[label]` to stderr.
 
-**Browser-free:** `start` (even `--gpu`/`--rclone`), `python`, `exec`, `fs`, `cp`, `rclone setup/mount`,
+**Browser-free:** `start` (even `--gpu`/`--rclone`), `python`, `exec`, `ssh`, `fs`, `cp`, `rclone setup/mount`,
 `list/status/health/quota/resources/ps/logs/resume/restart/attach/stop`.
 **Browser-triggering — avoid unless the user's at the keyboard:** `auth login`, `drive auth/mount`. Use
 `--rclone`/`fs`/`cp` instead of `drive`.
@@ -97,17 +99,57 @@ The tool will redirect you if you slip.
 | pip / shell command | `colab exec "pip install …"` (TTY; `--kernel` forces the robust channel) |
 | Detached shell job | `colab exec --bg "…" ` → `colab logs`. ⚠ outside the kernel → **reaped past ~2.5 h** AND no shared env/auth with other `--bg` shells; for long jobs use `python --detach` |
 
-⛔ **`colab exec` ALWAYS EXITS 0** — the remote command's exit status is not propagated. Verified
-2026-08-10: `exit 7`, `false` and `true` all return rc=0 locally. So **`colab exec` cannot be used as
-a condition**: `until colab exec "grep -q DONE log"; do sleep 60; done` exits on its first iteration
-and looks like the condition was met. Test the remote result on the **content** instead — have the
-command print something and grep the local output, or better, poll a gdrive checkpoint with local
-`rclone`, which is content-based and cannot lie about it.
-*(Tool bug, not a design choice — worth fixing in the Go `exec` path so it returns the remote status.)*
+✅ **`colab exec` propagates the remote exit status** (fixed + live-verified 2026-08-10; it used to
+always exit 0). So it CAN be used as a condition on both channels and in `colab cp`:
+
+```bash
+until colab exec "grep -q DONE /content/run.log"; do sleep 60; done   # bash
+colab cp mydrive:x /content/ || echo "transfer failed"            # rclone's own status
+```
+```fish
+while not colab exec "grep -q DONE /content/run.log"; sleep 60; end   # fish (no `until`)
+```
+
+A failure prints `[colab] command exited N` to **stderr** (stdout stays the command's output). If the
+status can't be read back it warns `exit status unavailable` and exits 0 — so a silent 0 is never a
+disguised failure. Still prefer a **content-based** check (poll a gdrive checkpoint with local
+`rclone`) for anything you'd walk away from: it survives a reap, an exit status doesn't.
 
 **Don't queue cells:** a second `colab python` blocks behind a busy cell. Monitor via a separate channel —
 `colab exec "tail …"` (TTY is independent of the kernel) or, better, local `rclone` on gdrive checkpoints.
 Reserve `colab python` for launching, never mid-run polling.
+
+## Real SSH (IDE remote-dev, scp/rsync)
+
+`colab ssh` opens a genuine SSH session over the runtime's `/colab/ssh` WebSocket — this is the one
+channel `exec`/`python` can't give you, and it's what makes VS Code Remote-SSH, JetBrains Gateway,
+`scp` and `rsync` work against Colab.
+
+```bash
+colab ssh --label myrun                      # interactive shell, starts in /content
+colab ssh --proxy-mode --label myrun         # stdio bridge, for ~/.ssh/config
+```
+
+```
+Host colab                                   # then: ssh colab · scp f colab:/content/ · rsync
+  ProxyCommand ~/.local/bin/colab ssh --proxy-mode --label myrun
+  User root
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+```
+Use the **absolute** `colab` path — ssh runs the ProxyCommand in a non-login shell.
+
+- Keys: **ed25519 / ecdsa only**; `ssh-rsa` is rejected server-side (400) and is deliberately not
+  auto-scanned. `--identity` picks a specific key.
+- **HTTP 404 = this runtime's image has no sshd.** SSH is baked in at creation, so an already-running
+  runtime cannot gain it — `colab start` a fresh one. Verified 2026-08-10 on a DEFAULT runtime: remote
+  exec, exit-code propagation, and `scp` to `/content/` all work.
+- ⚠ **`scp`/`rsync` here are NOT single-network** — bytes round-trip through your machine, same as
+  `fs get/put`. For bulk data still use `colab cp` (rclone on the box). SSH is for *interactive* work
+  and IDE attach, not for moving a corpus.
+- An SSH session is **not** a kernel cell: it does not keep the runtime busy, so it does not protect
+  against the reap. Long jobs still go through `colab python --detach`.
+- Only one SSH session at a time (429 if another is attached).
 
 ## Long-running jobs (training, multi-hour)
 

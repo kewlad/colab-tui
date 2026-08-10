@@ -239,13 +239,24 @@ func RunKeepalive(ctx context.Context, authMgr *auth.Manager, endpoint string) e
 				cleanup()
 				return nil
 			}
+			// Send the tunnel keep-alive UNCONDITIONALLY — it is the cheap
+			// mechanism that actually refreshes the idle timer (TFE stamps
+			// LastActiveTime on arrival) and it needs no kernel. Gating it on the
+			// held connection, as the VS Code extension does, is right for an IDE
+			// (let runtimes nobody is attached to die) and wrong here: you asked
+			// for this runtime, so a proxy blip or a dead kernel that blocks the
+			// re-dial must not also stop the pings and let it be idle-pruned.
+			// Log the success too, not just the failure: the daemon's output is
+			// discarded in normal use, so this line is what makes "was it
+			// actually pinging?" answerable when you run it in the foreground to
+			// diagnose an unexpected reap.
+			if err := client.SendKeepalive(ctx, endpoint); err != nil {
+				log.Printf("keepalive: HTTP keep-alive error for %s: %v", endpoint, err)
+			} else {
+				log.Printf("keepalive: ping OK for %s (held=%t)", endpoint, held != nil)
+			}
 			if held == nil {
 				connect()
-			}
-			if held != nil {
-				if err := client.SendKeepalive(ctx, endpoint); err != nil {
-					log.Printf("keepalive: HTTP keep-alive error for %s: %v", endpoint, err)
-				}
 			}
 			// Reload store, refresh the token if needed, and reconnect the held
 			// connection with the fresh token if it changed.

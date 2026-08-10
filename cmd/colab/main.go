@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -18,6 +19,14 @@ var (
 func echoTarget(label string) {
 	fmt.Fprintf(os.Stderr, "[%s]\n", label)
 }
+
+// exitCode is a RunE return value that makes `colab` exit with a specific
+// status and NO "Error:" line — the failure was the remote command's, and it
+// has already reported itself. This is what lets `colab exec` be used as a
+// shell condition (`if colab exec 'test -f /content/DONE'; then ...`).
+type exitCode int
+
+func (e exitCode) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 
 func main() {
 	root := &cobra.Command{
@@ -52,6 +61,7 @@ func main() {
 		newInterruptCmd(),
 		newResumeCmd(),
 		newExecCmd(),
+		newSSHCmd(),
 		newPythonCmd(),
 		newAttachCmd(),
 		newPsCmd(),
@@ -69,6 +79,10 @@ func main() {
 	)
 
 	if err := root.Execute(); err != nil {
+		var ec exitCode
+		if errors.As(err, &ec) {
+			os.Exit(int(ec))
+		}
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}

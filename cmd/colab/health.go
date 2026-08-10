@@ -82,9 +82,16 @@ colab_kernel'.`,
 			fmt.Printf("Endpoint:    %s\n", s.Endpoint)
 			fmt.Printf("Accelerator: %s %s\n", s.Variant, s.Accelerator)
 
+			// Report the PID from the PID FILE, not the session store: the store
+			// records whoever spawned first, so after a `colab resume` (or any
+			// daemon restart) it names a dead process you might then kill.
 			kaStatus := "DEAD (run: colab resume)"
 			if session.IsKeepaliveRunning(s.Endpoint) {
-				kaStatus = fmt.Sprintf("alive (PID %d)", s.KeepalivePID)
+				pid, err := session.ReadPID(s.Endpoint)
+				if err != nil {
+					pid = s.KeepalivePID
+				}
+				kaStatus = fmt.Sprintf("alive (PID %d)", pid)
 			}
 			fmt.Printf("Keepalive:   %s\n", kaStatus)
 

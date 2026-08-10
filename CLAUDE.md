@@ -22,7 +22,7 @@ changed.** Match existing style; don't touch the protocol layer without reading 
 ## Architecture
 
 ```
-cmd/colab/          # Cobra CLI commands (main, runtime, exec, fs, observe, health, auth, drive, rclone)
+cmd/colab/          # Cobra CLI commands (main, runtime, exec, ssh, fs, observe, health, auth, drive, rclone)
 internal/
   auth/             # OAuth2 + PKCE browser flow
   api/              # Colab HTTP API (assign, assignments, proxy token, keepalive, consumption, resources)
@@ -51,13 +51,28 @@ need a freshly installed `.vsix` (`out/extension.js`); the installed `google.col
   to GPU/TPU/DEFAULT, HIGHMEM/STANDARD in `client.go`.
 - **Endpoint map:** assign/unassign/keep-alive/credentials-propagation/list-sessions → colabDomain `/tun/m/*`;
   proxy-token/assignments/user-info(quota) → GAPI `/v1/*`; resources → proxy `baseURL/api/colab/resources`
-  (proxy-token header only); kernel REST/WS + `/colab/tty` → proxy baseURL.
+  (proxy-token header only); kernel REST/WS + `/colab/tty` + `/colab/ssh` → proxy baseURL.
+- **SSH (`/colab/ssh`, from the official google-colab-cli, live-verified 2026-08-10):** `wss://{proxyBaseURL}/colab/ssh`
+  with the proxy token as the **query param** `colab-runtime-proxy-token` (NOT the header the kernel/TTY sockets
+  use) and the public key verbatim in `X-Colab-Ssh-Pubkey`. Frames are the raw SSH byte stream — bridge them to
+  stdin/stdout and OpenSSH drives it as a `ProxyCommand`. Server-side only accepts `ssh-ed25519` /
+  `ecdsa-sha2-nistp*`; `ssh-rsa` → 400. Status map: 400 bad key · 401 stale token · 404 image has no sshd
+  (recreate the runtime — it cannot be added later) · 429 another session attached · 502 sshd down.
 - **Quota:** `GET {gapi}/v1/user-info?get_ccu_consumption_info=true` → `paidComputeUnitsBalance`,
   `consumptionRateHourly`, `assignmentsCount`, `freeCcuQuotaInfo.remainingTokens` (Int64 string, milli-CCUs).
 - **Resources:** `GET {proxyBaseURL}/api/colab/resources` → `memory`/`disks`/`gpus` (structured; beats nvidia-smi scraping).
 - **Keep-alive gating:** the extension only pings when a kernel has `connections > 0` and is active (busy or
-  `last_activity` within 1h); it lets connection-less runtimes die. We mirror this by HOLDING a kernel WS open
-  (KeepaliveConn) and only pinging while it's held.
+  `last_activity` within 1h); it lets connection-less runtimes die. We mirror the *hold* (KeepaliveConn keeps a
+  kernel WS open) but **deliberately diverge on the gating** — see below.
+- **Keep-alive ping is UNGATED (diverges from upstream, 2026-08-10).** The tunnel ping is what actually refreshes
+  the idle timer (TFE stamps `LastActiveTime` when the request ARRIVES, before forwarding to the VM), and it needs
+  no kernel. The extension's "only ping while a client is attached" rule is right for an IDE and wrong for a CLI:
+  you explicitly asked for this runtime, so a proxy blip or a wedged kernel that blocks the hold re-dial must not
+  also stop the pings and let it be idle-pruned. `SendKeepalive` therefore fires every cycle regardless of the held
+  connection, and **treats a read timeout as SUCCESS** — the VM usually never answers on this path, so the ping is
+  bounded at 20 s and only genuine HTTP errors (404 = deleted assignment) propagate. Same conclusion the official
+  google-colab-cli reached independently (their issue #14: a keep-alive that 403'd for every external user
+  idle-pruned sessions within minutes).
 - **assign:** `shape` query is only ever `hm` (STANDARD omitted); runtime version is `runtime_version_label=`, not `version=`.
 - **restart:** `POST /api/kernels/{id}/restart`, no body, kernel id preserved (ours matches — it's correct).
 
@@ -115,4 +130,18 @@ Key findings from reverse engineering:
   after the command echoed** is reported as "command still running after --timeout" instead of a wedge — previously the
   fallback would RE-RUN the half-executed command via the kernel. (4) `health` reports RAM, warns at ≥90% RAM/GPU-memory
   (OOM kills the VM → silent fresh-VM swap), and distinguishes UNKNOWN (Jupyter unreachable, mid-recycle) from DOWN.
+- **(FIXED 2026-08-10, live-verified)** **`colab exec` propagates the remote exit status.** It always exited 0, so
+  it could not be used as a shell condition (`until colab exec "grep -q DONE log"` exited on its first iteration
+  and looked like the condition was met). The TTY end marker now carries `$?` (`END_xxx:7`, with a 2 s grace read
+  for digits that land in a later frame) and the kernel channel prints `__COLAB_RC__<returncode>`; both flow through
+  `runtimeShell` → `reportStatus` → an `exitCode` error that `main` turns into the process status with no "Error:"
+  line. An unreadable status is `StatusUnknown` (-1) → warn on stderr, exit 0 — never a silent 0. `colab cp` now
+  also exits with rclone's status (its old `echo "[rclone copy exit $?]"` reported **tail**'s status through the
+  pipe, i.e. always 0 — now `${PIPESTATUS[0]}`). Found while adding this: the kernel-shell cell's trailing
+  `sys.stdout.write(...)` was **unbound**, so IPython echoed the write's char count into the command's output
+  (that is where the bogus `14` came from) — every write is now bound to `_`.
+- **(ADDED 2026-08-10, live-verified)** **`colab ssh` / `colab ssh --proxy-mode`** — real SSH over the
+  `/colab/ssh` WebSocket (protocol section above), so VS Code Remote-SSH / JetBrains Gateway / scp / rsync work
+  against a runtime. Interactive mode re-invokes this binary as ssh's own `ProxyCommand` (propagating `--profile`,
+  or the bridge would resolve the runtime in the wrong account's store) and lands in `/content`.
 - **(FIXED 2026-06-30, live-verified)** `runCell` (backs `python`/`exec --kernel`) now filters inbound messages by parent `msg_id` (was: returned on the first `execute_reply` of ANY msg → on a shared kernel, e.g. with the keepalive connection held, it could report success having run nothing — the ~1s silent no-op). `colab python -f` now runs a **runtime** path in the kernel via `_runpy.run_path(run_name="__main__")` (bound to `_` so the returned globals dict isn't echoed) and only reads-and-sends when the path exists locally (was: local-only `os.ReadFile`, so staged `/content/x.py` errored). A missing runtime path surfaces as a `FileNotFoundError` traceback. `colab stop` now also accepts `--label`. Smoke-tested on a live DEFAULT runtime: runtime-path runpy (`__main__`/`__file__` correct, streamed), local fallback, env-persists-across-calls, missing-path error, `stop --label`.

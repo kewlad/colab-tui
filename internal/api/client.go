@@ -4,8 +4,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -510,13 +512,42 @@ func (c *Client) GetResources(ctx context.Context, baseURL, token string) (*Reso
 }
 
 // SendKeepalive pings the runtime to prevent it from being reclaimed.
+//
+// The Tunnel Frontend records the assignment's last-active time when the request
+// ARRIVES and only then forwards it to the VM, which frequently does not answer
+// on this path — so a read timeout means the keep-alive landed, not that it
+// failed. Treating it as an error would make an ungated caller give up on a
+// runtime that is being kept alive perfectly well. Genuine HTTP errors (404 for
+// a deleted assignment, 4xx for a bad token) still propagate.
 func (c *Client) SendKeepalive(ctx context.Context, endpoint string) error {
+	ctx, cancel := context.WithTimeout(ctx, keepaliveTimeout)
+	defer cancel()
 	path := config.TunBase + "/" + endpoint + "/keep-alive/"
 	_, err := c.doRequest(ctx, http.MethodGet, path, map[string]string{
 		config.HTunnel: config.HTunnelVal,
 	})
-	if err != nil {
-		return fmt.Errorf("keepalive: %w", err)
+	return keepaliveResult(err)
+}
+
+// keepaliveResult maps a keep-alive request outcome to success or failure: a
+// timeout is success (the ping reached TFE), anything else propagates.
+func keepaliveResult(err error) error {
+	if err == nil || isTimeoutErr(err) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("keepalive: %w", err)
+}
+
+// keepaliveTimeout bounds a single keep-alive ping so the daemon's loop can
+// never be blocked by the VM not answering (see SendKeepalive).
+const keepaliveTimeout = 20 * time.Second
+
+// isTimeoutErr reports whether err is a request/response deadline expiry rather
+// than a server-side rejection.
+func isTimeoutErr(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

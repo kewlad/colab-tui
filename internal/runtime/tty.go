@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,11 @@ func isReadTimeout(err error) bool {
 	return ok && ne.Timeout()
 }
 
+// StatusUnknown is returned as the exit status when the remote command's `$?`
+// could not be read back off the TTY (a truncated end marker). It is distinct
+// from 0 so callers never report a failure as success, nor vice versa.
+const StatusUnknown = -1
+
 // wrapCommand builds the tty input line for a synchronous Exec/ExecStream.
 // The user command is base64-encoded and run inside its OWN bash subshell so
 // that (a) no shell quoting/escaping of cmd is needed and (b) the user command
@@ -37,9 +43,38 @@ func isReadTimeout(err error) bool {
 // trailing end-marker echo from running. Without this isolation, a command that
 // exits the shell never emits the end marker and the reader blocks until the
 // full timeout (the "hangs at the end even though the work finished" failure).
+//
+// The end marker carries the subshell's `$?` (`END_xxx:7`) so the caller can
+// propagate the REMOTE exit status. Without it every `colab exec` exits 0 and
+// cannot be used as a shell condition — `until colab exec "grep -q DONE log"`
+// would exit on its first iteration looking like the condition was met.
 func wrapCommand(startMarker, cmd, endMarker string) string {
 	enc := base64.StdEncoding.EncodeToString([]byte(cmd))
-	return fmt.Sprintf("echo %s; bash -c \"$(echo %s | base64 -d)\"; echo %s\n", startMarker, enc, endMarker)
+	return fmt.Sprintf("echo %s; bash -c \"$(echo %s | base64 -d)\"; echo %s:$?\n", startMarker, enc, endMarker)
+}
+
+// parseExitStatus extracts the status appended to the end marker
+// (`END_xxx:7`). The command echo also contains the marker but is followed by
+// the literal `:$?`, so only a marker followed by digits matches; the LAST such
+// occurrence wins. Returns StatusUnknown when no digits followed the marker.
+func parseExitStatus(clean, endMarker string) int {
+	status := StatusUnknown
+	for off := 0; ; {
+		i := strings.Index(clean[off:], endMarker+":")
+		if i < 0 {
+			return status
+		}
+		off += i + len(endMarker) + 1
+		j := off
+		for j < len(clean) && clean[j] >= '0' && clean[j] <= '9' {
+			j++
+		}
+		if j > off {
+			if n, err := strconv.Atoi(clean[off:j]); err == nil {
+				status = n
+			}
+		}
+	}
 }
 
 // TTY holds a WebSocket connection to the Colab TTY endpoint.
@@ -96,10 +131,15 @@ func (t *TTY) sync() {
 	t.conn.SetReadDeadline(time.Time{})
 }
 
-// Exec runs cmd synchronously and returns the cleaned output.
+// statusGrace is how long to keep reading after the end marker appears, waiting
+// for the `:$?` digits that may land in a later websocket frame.
+const statusGrace = 2 * time.Second
+
+// Exec runs cmd synchronously and returns the cleaned output and the remote
+// command's exit status (StatusUnknown if the status digits never arrived).
 // Uses a start+end marker pair so we only capture output from THIS command,
 // ignoring any leftover scrollback.
-func (t *TTY) Exec(cmd string, timeout time.Duration) (string, error) {
+func (t *TTY) Exec(cmd string, timeout time.Duration) (string, int, error) {
 	id := randHex(12)
 	startMarker := "START_" + id
 	endMarker := "END_" + id
@@ -107,7 +147,7 @@ func (t *TTY) Exec(cmd string, timeout time.Duration) (string, error) {
 	// Echo start marker, run command (isolated subshell), echo end marker — one payload.
 	payload := ttyMsg{Data: wrapCommand(startMarker, cmd, endMarker)}
 	if err := t.conn.WriteJSON(payload); err != nil {
-		return "", fmt.Errorf("tty exec write: %w", err)
+		return "", StatusUnknown, fmt.Errorf("tty exec write: %w", err)
 	}
 
 	var buf strings.Builder
@@ -117,26 +157,39 @@ func (t *TTY) Exec(cmd string, timeout time.Duration) (string, error) {
 	// The end marker appears in the echoed command AND in the actual output.
 	// We need to find at least 2 occurrences of endMarker (command echo + output),
 	// or specifically: endMarker on its own line after startMarker output.
+	status := StatusUnknown
+	inGrace := false
 	for {
 		var msg ttyMsg
 		if err := t.conn.ReadJSON(&msg); err != nil {
+			// The end marker already landed; only its status digits are missing.
+			// Report the output rather than failing the whole command.
+			if inGrace && isReadTimeout(err) {
+				break
+			}
 			// If the TTY already echoed our command back, the terminal is alive
 			// and a deadline expiry means the COMMAND outlived the timeout.
 			if isReadTimeout(err) && strings.Count(StripAnsi(buf.String()), startMarker) >= 1 {
-				return "", cmdTimeoutErr(timeout)
+				return "", StatusUnknown, cmdTimeoutErr(timeout)
 			}
-			return "", fmt.Errorf("tty exec read: %w", err)
+			return "", StatusUnknown, fmt.Errorf("tty exec read: %w", err)
 		}
 		buf.WriteString(msg.Data)
 		full := StripAnsi(buf.String())
 		// Count occurrences of endMarker — need at least 2
 		// (one in command echo, one in actual output)
 		if strings.Count(full, endMarker) >= 2 {
-			break
+			if status = parseExitStatus(full, endMarker); status != StatusUnknown {
+				break
+			}
+			if !inGrace {
+				inGrace = true
+				t.conn.SetReadDeadline(time.Now().Add(statusGrace))
+			}
 		}
 	}
 
-	return extractBetweenMarkers(buf.String(), startMarker, endMarker, cmd), nil
+	return extractBetweenMarkers(buf.String(), startMarker, endMarker, cmd), status, nil
 }
 
 // extractBetweenMarkers pulls only the content between start and end markers,
@@ -174,17 +227,39 @@ func extractBetweenMarkers(raw, startMarker, endMarker, cmd string) string {
 	return strings.TrimRight(content, "\r\n ")
 }
 
+// readStatus keeps reading after the end marker has appeared, until the `:$?`
+// digits arrive or statusGrace expires. seen must be the ANSI-stripped text
+// containing the marker.
+func (t *TTY) readStatus(seen, endMarker string) int {
+	if s := parseExitStatus(seen, endMarker); s != StatusUnknown {
+		return s
+	}
+	t.conn.SetReadDeadline(time.Now().Add(statusGrace))
+	tail := seen
+	for {
+		var msg ttyMsg
+		if err := t.conn.ReadJSON(&msg); err != nil {
+			return StatusUnknown
+		}
+		tail += StripAnsi(msg.Data)
+		if s := parseExitStatus(tail, endMarker); s != StatusUnknown {
+			return s
+		}
+	}
+}
+
 // ExecStream runs cmd and writes each received chunk to w, stopping at the marker.
 // It waits for the SECOND occurrence of startMarker (the actual echo output, not the
 // command echo) before streaming, and strips \r characters for clean output.
-func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
+// Returns the remote command's exit status (StatusUnknown if unreadable).
+func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) (int, error) {
 	id := randHex(12)
 	startMarker := "START_" + id
 	endMarker := "END_" + id
 
 	payload := ttyMsg{Data: wrapCommand(startMarker, cmd, endMarker)}
 	if err := t.conn.WriteJSON(payload); err != nil {
-		return fmt.Errorf("tty stream write: %w", err)
+		return StatusUnknown, fmt.Errorf("tty stream write: %w", err)
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -202,9 +277,9 @@ func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
 			// so a deadline expiry is the command outliving the timeout — not a
 			// wedge to fall back (and re-run the command!) on.
 			if isReadTimeout(err) && (started || startCount >= 1) {
-				return cmdTimeoutErr(timeout)
+				return StatusUnknown, cmdTimeoutErr(timeout)
 			}
-			return fmt.Errorf("tty stream read: %w", err)
+			return StatusUnknown, fmt.Errorf("tty stream read: %w", err)
 		}
 		chunk := StripAnsi(msg.Data)
 		chunk = strings.ReplaceAll(chunk, "\r", "")
@@ -235,7 +310,7 @@ func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
 					if content != "" {
 						fmt.Fprint(w, content)
 					}
-					return nil
+					return t.readStatus(after[endIdx:], endMarker), nil
 				}
 				content := cleanStreamOutput(after)
 				if content != "" {
@@ -248,16 +323,15 @@ func (t *TTY) ExecStream(cmd string, w io.Writer, timeout time.Duration) error {
 
 		// Already started — check for end marker in accumulated
 		accumulated2 := accumulated.String()
-		if strings.Contains(accumulated2, endMarker) {
-			before, _, _ := strings.Cut(accumulated2, endMarker)
-			content := cleanStreamOutput(before)
+		if idx := strings.Index(accumulated2, endMarker); idx >= 0 {
+			content := cleanStreamOutput(accumulated2[:idx])
 			if lastEndedNewline {
 				content = strings.TrimLeft(content, "\n")
 			}
 			if content != "" {
 				fmt.Fprint(w, content)
 			}
-			return nil
+			return t.readStatus(accumulated2[idx:], endMarker), nil
 		}
 		// Flush what we have
 		content := cleanStreamOutput(chunk)

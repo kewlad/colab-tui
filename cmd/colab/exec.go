@@ -76,7 +76,7 @@ func newExecCmd() *cobra.Command {
 			}
 
 			if kernelMode {
-				out, err := kernelShell(s.BaseURL, s.Token, s.Label, command, dur)
+				out, rc, err := kernelShell(s.BaseURL, s.Token, s.Label, command, dur)
 				if err != nil {
 					return err
 				}
@@ -84,11 +84,15 @@ func newExecCmd() *cobra.Command {
 				if !strings.HasSuffix(out, "\n") {
 					fmt.Println()
 				}
-				return nil
+				return reportStatus(rc, "command")
 			}
 
 			// TTY, auto-falling back to the kernel channel if the terminal is wedged.
-			return runtimeShell(s.BaseURL, s.Token, s.Label, command, dur, os.Stdout)
+			rc, err := runtimeShell(s.BaseURL, s.Token, s.Label, command, dur, os.Stdout)
+			if err != nil {
+				return err
+			}
+			return reportStatus(rc, "command")
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
@@ -295,7 +299,7 @@ func newPsCmd() *cobra.Command {
 			}
 			defer tty.Close()
 
-			output, err := tty.Exec("ps aux", 30*time.Second)
+			output, _, err := tty.Exec("ps aux", 30*time.Second)
 			if err != nil {
 				return err
 			}
@@ -343,7 +347,7 @@ func newLogsCmd() *cobra.Command {
 				logCmd = "cat " + target
 			}
 
-			output, err := tty.Exec(logCmd, 30*time.Second)
+			output, _, err := tty.Exec(logCmd, 30*time.Second)
 			if err != nil {
 				return err
 			}

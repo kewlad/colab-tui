@@ -48,7 +48,8 @@ rclone lsd %s: >/dev/null 2>&1 && echo "OK: remote '%s' reachable from the runti
 		b64, remote, remote, remote, remote)
 
 	fmt.Printf("Setting up rclone remote %q on the runtime (headless, no consent)...\n", remote)
-	return runtimeShell(baseURL, token, label, script, 300*time.Second, os.Stdout)
+	_, err = runtimeShell(baseURL, token, label, script, 300*time.Second, os.Stdout)
+	return err
 }
 
 func newRcloneCmd() *cobra.Command {
@@ -117,7 +118,8 @@ a runtime crash can lose writes still buffered in the VFS cache.`,
 rclone mount %q %q --daemon --vfs-cache-mode writes --dir-cache-time 10s --allow-non-empty 2>&1
 sleep 2; mountpoint -q %q && echo "mounted %s at %s" || echo "WARN: mount may have failed"`,
 				mountpoint, src, mountpoint, mountpoint, src, mountpoint)
-			return runtimeShell(s.BaseURL, s.Token, s.Label, script, 60*time.Second, os.Stdout)
+			_, err = runtimeShell(s.BaseURL, s.Token, s.Label, script, 60*time.Second, os.Stdout)
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
@@ -152,8 +154,14 @@ colab start --rclone REMOTE).`,
 				return err
 			}
 			echoTarget(s.Label)
-			script := fmt.Sprintf(`rclone copy %q %q 2>&1 | tail -3; echo "[rclone copy exit $?]"`, args[0], args[1])
-			return runtimeShell(s.BaseURL, s.Token, s.Label, script, time.Duration(timeout)*time.Second, os.Stdout)
+			// PIPESTATUS[0], not $? — $? after the pipe is tail's status, so a
+			// failed rclone reported "[rclone copy exit 0]".
+			script := fmt.Sprintf(`rclone copy %q %q 2>&1 | tail -3; rc=${PIPESTATUS[0]}; echo "[rclone copy exit $rc]"; exit $rc`, args[0], args[1])
+			rc, err := runtimeShell(s.BaseURL, s.Token, s.Label, script, time.Duration(timeout)*time.Second, os.Stdout)
+			if err != nil {
+				return err
+			}
+			return reportStatus(rc, "rclone copy")
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Runtime label")
