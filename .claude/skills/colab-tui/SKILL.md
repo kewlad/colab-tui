@@ -106,6 +106,16 @@ Reserve `colab python` for launching, never mid-run polling.
 1. Launch synchronously (under Bash `run_in_background:true`) so the kernel stays busy.
 2. **Checkpoint per unit to gdrive** (e.g. ultralytics `on_fit_epoch_end` rclone-pushing `last.pt`) — the
    one legit case for Colab writing to gdrive; inference/validation results stream to **local**.
+   ⛔ **MAKE THE PUSH REPORT ITSELF — both ways.** `subprocess.run(..., check=False,
+   capture_output=True)` with nothing reading `returncode` is not a backup, it is a backup-shaped
+   hole: a non-zero rclone exit is completely invisible. Measured 2026-08-10 — a callback pushed
+   `results.csv` and `ignore_budget.csv` every epoch for **nine epochs** while the 92 MB `last.pt`
+   never left the runtime, and the log said nothing. The model existed only on a VM a reap would
+   have wiped. **Print the byte count on success and the stderr tail on failure**, and print
+   explicitly when a file was skipped because it did not exist yet — `if not p.exists(): continue`
+   is the other silent path, and at the first epoch it is always taken.
+   ⚠ And **verify the destination independently at least once mid-run** (`rclone lsl <dest>`), not
+   at the end. The whole point is to find out while the runtime is still alive.
 3. **Resume-skip on relaunch** (`YOLO(last.pt).train(resume=True)`, or skip done units). A killed `--bg`
    backup loop is unreliable — use the in-process callback.
 4. Wrap each unit in try/except (a dead cell → idle → reap wipes unsaved work).
