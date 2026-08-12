@@ -84,6 +84,20 @@ launch quietly trained on the default dataset path after a probe had imported th
 it (and its siblings), set the env FIRST, then **assert the module picked up your value**. Or just
 `colab restart` — a clean kernel has no cache to fool you.
 
+⛔⛔ **DELETE THE LOG BEFORE RELAUNCHING, or your monitor reads the PREVIOUS run's verdict.**
+The most expensive mistake of 2026-08-12, and it was self-inflicted. A detached cell wrote its outcome
+to `/content/smoke.log`; the watcher grepped that file for `SMOKE_OK|SMOKE_FAIL`. On relaunch the new
+cell had not written yet, so the **first poll matched the previous attempt's `SMOKE_FAIL` and fired
+instantly**. I then "diagnosed" a `ModuleNotFoundError` that had already been fixed, invented a wrong
+cause for it, `colab restart`ed, and finally **`colab interrupt`ed a run that was training correctly**
+— proven afterwards by `runs/<name>/args.yaml` existing, which the trainer only writes once every
+import has succeeded.
+⇒ `rm -f <log>` in the launch cell itself, **and** make the sentinel unique per attempt (a timestamp or
+run id passed in), so a stale line cannot satisfy the watcher. ⭐ Cross-check with
+`colab health` before believing a failure: **`Kernel: busy` means the cell is still running**, whatever
+an old log says. ⚠ Same family as the silent-zero trap — a stale success and a stale failure both read
+exactly like a fresh one.
+
 ⚠ **That persistence cuts both ways: a smoke test's `os.environ` leaks into the production launch.**
 Setting `NSHARD`/`SHARD`/`OUT` (or any knob) to test on a few items leaves them set for the *next* cell,
 so the "full" run silently processes the test slice and exits looking successful. **Explicitly reset every
@@ -203,6 +217,27 @@ Use the **absolute** `colab` path — ssh runs the ProxyCommand in a non-login s
    stdout — no log file needed) or `colab attach`; to follow a logfile add `--log /content/run.log`.
    For fleet/gdrive-marker monitoring use ONE recurring loop (check via local `rclone lsf <gdrive>/DONE`)
    — never N one-shot `until…;sleep` shells; they leak.
+
+## ⛔⛔ A REAP MASQUERADES AS A DOZEN OTHER BUGS — check `/content` FIRST
+
+2026-08-12, cost most of an evening. A runtime reaped **while I sat idle debugging** (keepalive alive,
+same endpoint, `colab exec` still working). Everything after that looked like unrelated failures:
+- a detached cell "produced nothing" — kernel idle, no log, no run dir
+- `runpy.run_path` → `FileNotFoundError` on a launcher I had definitely uploaded
+- ⭐ **`rclone` itself vanished** → every `rclone copy` returned **rc=127** (command not found). The
+  binary that `colab start --rclone <remote>` installs is *inside* the wiped container. Re-provision
+  with `colab rclone setup <remote> --label X` — it is headless and takes seconds.
+- ⚠ and 2.2 GB of extracted images, all labels, ignore planes, the donor checkpoint, **and the pip-installed
+  `ultralytics`** were gone.
+
+⇒ **Before diagnosing any weird failure, run `ls /content` and compare against what you staged.**
+A file you uploaded that is missing means a reap, not a bug in your code. `colab health` says
+`ALIVE & IDLE — /content intact` only because it checks a sentinel it wrote — trust the actual listing.
+
+⭐⭐ **And the real fix is procedural: never idle between staging and training.** The reap happened in
+the gap while I debugged. Put re-stage **and** launch in ONE kernel cell (`colab python -f bootstrap.py`)
+so the kernel is busy from the first second, assert the dataset shape inside that cell before the
+expensive step, and keep the per-epoch gdrive push so the next reap costs one epoch instead of the run.
 
 ## Diagnosing a stuck / dead runtime
 
