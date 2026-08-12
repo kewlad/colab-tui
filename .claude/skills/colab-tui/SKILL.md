@@ -269,6 +269,9 @@ fresh + resume from checkpoint.
 
 - Fresh runtimes **lack `ultralytics`** → `pip install ultralytics==<training version>` first
   (torch/cv2/scipy/pandas/boto3 present; `reverse_geocoder`/`loguru` not).
+  ⭐ The checkpoint records which version wrote it — `torch.load(ckpt, map_location="cpu",
+  weights_only=False)["version"]` (also `["date"]`). Read it rather than guessing or installing latest;
+  a version skew silently changes head/loss internals on a model you are only trying to score.
 - For S3 work **don't import a heavy in-house SDK on the runtime** (its `__init__` builds a ~150 MB reverse-geocoder
   KDTree) — resolve keys locally, pass a tiny `{dp_id: s3_key}` JSON, use **boto3 directly** (bucket
   `my-bucket`, region `eu-west-1`).
