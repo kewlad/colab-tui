@@ -27,4 +27,5 @@ boto3 defensively first rather than assuming it. (Promote to SKILL.md if it recu
 Also confirmed present on that image: torch 2.11/cu128, **transformers 5.12 with full SAM3** (`Sam3Model`/
 `Sam3Processor`), cv2. SAM3 gated weights load fine once `~/.cache/huggingface/token` is written.
 
-<!-- Add un-promoted observations above this line. (Currently empty — all learnings are in SKILL.md / CLAUDE.md.) -->
+<!-- Add un-promoted observations ABOVE this line, newest first. -->
+

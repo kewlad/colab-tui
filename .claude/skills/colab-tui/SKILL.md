@@ -55,7 +55,8 @@ colab stop --label myrun                            # release the slot when done
 ```
 
 **Targeting:** one runtime → used automatically; **several → commands refuse to guess** (pass `--label`,
-or positional `[LABEL]` on `health`/`status`/`restart`/`stop`). `python`/`exec` take only CODE/COMMAND
+or positional `[LABEL]` on `health`/`status`/`restart`/`stop`/`resume`/`interrupt` — the last two take it
+**positionally only**, unlike `python`/`exec`/`fs`). `python`/`exec` take only CODE/COMMAND
 positionally and **reject a positional label** (it would be joined into the cell/command and corrupt it) —
 always use `--label` there. Mutating commands echo `[label]` to stderr.
 
@@ -245,6 +246,13 @@ fresh + resume from checkpoint.
 - **Many small files are Drive-throttled to a crawl** → tar into ONE file, transfer, untar on the box.
   Check whether a tar already exists next to the data before copying a directory — a 2,420-file label set
   shipped as one 8 MB `labels.tar` in seconds after the loose-file copy had wedged for 20 min.
+- ⛔ **`tar` a dataset of SYMLINKS with `-h`, or it arrives dangling.** A dir whose `images/` are symlinks
+  into another local tree tars as *links*, not files — 298 MB instead of 2.5 GB. It extracts cleanly, then
+  ultralytics logs `ignoring corrupt image/label: No such file or directory` per image and dies with
+  `No valid images found in …labels/train.cache`, i.e. it presents as a **dataset** error, not a staging
+  one. Use `tar -ch`; better, check whether the real images are already on gdrive from an earlier run and
+  re-point the symlinks on the runtime instead of pushing GB from here. Delete `labels/*.cache` before
+  relaunching or the bad scan is reused.
 - ⚠ **Run bulk `rclone` FROM THE KERNEL, not `exec --bg`.** A `--bg` shell dies with its TTY session, and
   a multi-step chain (`images ; labels ; meta`) then stops **silently mid-way** — the big first step looks
   like success while the later ones never ran and nothing reports an error. Not a reap; this happened at
@@ -271,6 +279,12 @@ fresh + resume from checkpoint.
 
 - Only **live runtimes bill** (~1.07 units/hr/T4, A100 ≈ 12/hr); the `lab.ipynb … N min ago` rows in
   "Active sessions" are cosmetic connect-history. `colab quota` shows the real burn + balance.
+- ⛔ **`quota` prints TWO balance fields — read both.** `Paid units:` and `Free quota: N CCU remaining`
+  are separate lines, and a Free-tier profile shows `Paid units: 0.00` while still holding free CCU.
+  Grepping for "units" alone reports a live account as empty (I did this and under-counted the total
+  budget by 12 CCU across two profiles). Print the whole `colab quota` output, or match `Free quota` too.
+  ⭐ Sum across profiles before declaring a job unaffordable — free profiles refill daily (~6 CCU each
+  here) and are the right home for short tests, keeping paid units for one long uninterrupted run.
 - **A100-40GB available headless on Pro** (`--accelerator A100`): ~6× a T4, ~10× the burn — reserve for
   slow/high-capacity configs.
 - Not an abuse risk — first-party-sanctioned protocol; the only real limit on Pro is the ~2-concurrent-GPU
