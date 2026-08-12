@@ -74,6 +74,15 @@ fast, throwaway shell: `pip install`, `ls`, `tail`, `ps`, file moves. **Anything
 real job" goes through the kernel** — not `exec --bg` (that's a separate nohup shell: reap-blind past ~2.5 h
 *and* each invocation is a fresh process, so a login/env from one `--bg` does NOT carry to the next).
 
+⛔ **…and that persistence is also a TRAP: the kernel caches `sys.modules`.** A module that reads its
+config at IMPORT time (module-level `os.environ.get(...)`) is frozen with whatever env existed at the
+FIRST import — often a throwaway probe cell. Re-importing later is a no-op, so new env vars are
+silently ignored and the job runs against the defaults with no error. Measured 2026-08-12: a training
+launch quietly trained on the default dataset path after a probe had imported the module first.
+⇒ Before importing a config-at-import-time module in a long-lived kernel, `del sys.modules[...]` for
+it (and its siblings), set the env FIRST, then **assert the module picked up your value**. Or just
+`colab restart` — a clean kernel has no cache to fool you.
+
 ⚠ **That persistence cuts both ways: a smoke test's `os.environ` leaks into the production launch.**
 Setting `NSHARD`/`SHARD`/`OUT` (or any knob) to test on a few items leaves them set for the *next* cell,
 so the "full" run silently processes the test slice and exits looking successful. **Explicitly reset every
@@ -94,7 +103,7 @@ The tool will redirect you if you slip.
 |------|-----|
 | Run a cell, see output | `colab python "<code>"` — reliable, keeps kernel busy |
 | Long job, don't block the turn | synchronous `colab python` under the Bash tool's `run_in_background:true` |
-| Fire-and-disconnect a long job | `colab python --detach` — reap-safe (kernel stays busy); returns once it confirms start |
+| Fire-and-disconnect a long job | `colab python --detach` — reap-safe (kernel stays busy); returns once it confirms start. ⛔ inside a detached cell do NOT wrap work in `contextlib.redirect_stdout(open(...))` — when the harness detaches, the stream closes under you and the job dies with `ValueError: I/O operation on closed file`, usually mid-run and after the log already looked healthy (measured 2026-08-11: died at frame 27 of 1,592). Launch a **`subprocess.Popen([sys.executable,'-u',script], stdout=fh, stderr=STDOUT)`** writing to a real file instead — the pattern the seg-programme launchers use |
 | **Run a staged script** | `fs put`/`cp` it to the runtime → `colab python -f /content/x.py` — runs **in the kernel** via `runpy` with real `python x.py` semantics (`__main__`, `__file__`). A **local** path is instead read + sent as a cell. (inline code >~10 KB jams the kernel — stage it.) |
 | pip / shell command | `colab exec "pip install …"` (TTY; `--kernel` forces the robust channel) |
 | Detached shell job | `colab exec --bg "…" ` → `colab logs`. ⚠ outside the kernel → **reaped past ~2.5 h** AND no shared env/auth with other `--bg` shells; for long jobs use `python --detach` |
@@ -154,6 +163,13 @@ Use the **absolute** `colab` path — ssh runs the ProxyCommand in a non-login s
 ## Long-running jobs (training, multi-hour)
 
 1. Launch synchronously (under Bash `run_in_background:true`) so the kernel stays busy.
+1b. ⛔⛔ **PERSIST THE EXPENSIVELY-BUILT *INPUTS* TOO, not just the weights.** A reap wipes
+   `/content` entirely, and per-epoch weight checkpointing saves only the model. Measured
+   2026-08-12: a reap at epoch 44 cost **40 minutes** of rebuild — 2.6 GB image tar, labels,
+   relabel step, pip install — because the built dataset had never been pushed anywhere. The
+   weights were fine; everything needed to *use* them was gone. ⇒ The moment a dataset/index/cache
+   takes more than a couple of minutes to build on the runtime, `tar` it and `rclone` it to gdrive
+   **once**, then pull it on relaunch. This is the second legit case for Colab writing to gdrive.
 2. **Checkpoint per unit to gdrive** (e.g. ultralytics `on_fit_epoch_end` rclone-pushing `last.pt`) — the
    one legit case for Colab writing to gdrive; inference/validation results stream to **local**.
    ⛔ **MAKE THE PUSH REPORT ITSELF — both ways.** `subprocess.run(..., check=False,
@@ -168,6 +184,18 @@ Use the **absolute** `colab` path — ssh runs the ProxyCommand in a non-login s
    at the end. The whole point is to find out while the runtime is still alive.
 3. **Resume-skip on relaunch** (`YOLO(last.pt).train(resume=True)`, or skip done units). A killed `--bg`
    backup loop is unreliable — use the in-process callback.
+   ⛔⛔ **RESUME MUST READ THE CHECKPOINT STORE, NOT LOCAL DISK.** Measured 2026-08-11: a job pushed
+   per-unit results to gdrive every 40 units and computed its work-list from
+   `os.path.exists(f"{LOCAL_OUT}/{id}")`. A reap wiped `/content`, so on relaunch the local dir was
+   empty, the job cheerfully "resumed" from **zero**, and the log looked healthy. Checkpointing you
+   never read back is **write-only checkpointing**. Start every resumable job with
+   `rclone copy '<gdrive>' <local_out>` and **print how many units it recovered** — a silent 0 is
+   the failure mode.
+   ⚠ **A reap also removes everything you installed.** It is a fresh VM behind the same endpoint:
+   `pip install`s, **rclone itself** (`rclone: command not found`), staged scripts, secrets, and any
+   extracted data are gone. Re-stage all of it, and re-run `colab rclone setup <remote>` *before*
+   any command whose recovery depends on rclone — otherwise the recovery step fails silently and
+   the job starts from nothing with no data.
 4. Wrap each unit in try/except (a dead cell → idle → reap wipes unsaved work).
 5. **Monitor with `colab watch <label>`** — reap-safe heartbeat (kernel state + GPU util, exits when the
    cell finishes). For the running cell's **live output** use **`colab watch --stream`** (taps kernel
