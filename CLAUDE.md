@@ -37,6 +37,8 @@ Source (official open-source): clone https://github.com/googlecolab/colab-vscode
 **Protocol audited against upstream v0.8.1 (2026-06-26).** ClientId/ClientSecret are injected at BUILD time
 (`scripts/generate-config.mts`), so the OSS clone has NO live OAuth client id/secret — to re-extract those you
 need a freshly installed `.vsix` (`out/extension.js`); the installed `google.colab-0.3.0` is no longer on disk.
+colab-tui does not compile them in either — `config.OAuth()` reads `$COLAB_CLIENT_ID`/`$COLAB_CLIENT_SECRET`
+or `~/.config/colab-tui/oauth.json` at runtime, so a published secret cannot be auto-revoked out from under us.
 
 ### v0.8.1 protocol (what colab-tui now implements)
 - **Two hosts.** `colab.research.google.com` (`colabDomain`) serves `/tun/m/*` tunnel + XSRF calls.

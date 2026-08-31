@@ -36,7 +36,31 @@ Or from a clone:
 go build -o ~/.local/bin/colab ./cmd/colab
 ```
 
-First run needs a one-time Google OAuth consent in a browser:
+### First-time setup: OAuth credentials
+
+The tool needs the Colab VS Code extension's OAuth *installed-app* credentials, because it speaks that
+extension's protocol. They are not compiled in — a client secret published to a git host gets
+auto-revoked by Google, which would break every user of the tool at once. Supply your own:
+
+```bash
+mkdir -p ~/.config/colab-tui
+cat > ~/.config/colab-tui/oauth.json <<'JSON'
+{
+  "client_id": "<id>.apps.googleusercontent.com",
+  "client_secret": "<secret>"
+}
+JSON
+chmod 600 ~/.config/colab-tui/oauth.json
+```
+
+`$COLAB_CLIENT_ID` / `$COLAB_CLIENT_SECRET` take precedence over the file if both are set. The file
+sits at the config root, not inside a profile — the credentials identify the client, not the account,
+so all profiles share them.
+
+The extension injects these at build time (`scripts/generate-config.mts`), so they are absent from its
+open-source repo. Extract them from `out/extension.js` of a freshly installed `.vsix`.
+
+Then a one-time Google consent in a browser:
 
 ```bash
 colab auth login

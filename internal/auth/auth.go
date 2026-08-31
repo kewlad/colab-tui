@@ -79,6 +79,12 @@ func (m *Manager) Save(path ...string) error {
 
 // Login performs the full OAuth2+PKCE flow, saving the refresh token on success.
 func (m *Manager) Login(ctx context.Context) error {
+	// Resolve credentials first: fail before opening a browser or a listener.
+	creds, err := config.OAuth()
+	if err != nil {
+		return err
+	}
+
 	// Generate PKCE verifier (64 random bytes → base64url, no padding).
 	raw := make([]byte, 64)
 	if _, err := rand.Read(raw); err != nil {
@@ -124,7 +130,7 @@ func (m *Manager) Login(ctx context.Context) error {
 
 	// Build authorization URL.
 	params := url.Values{
-		"client_id":             {config.ClientID},
+		"client_id":             {creds.ClientID},
 		"redirect_uri":          {redirectURI},
 		"response_type":         {"code"},
 		"scope":                 {config.OAuthScope},
@@ -135,6 +141,7 @@ func (m *Manager) Login(ctx context.Context) error {
 	}
 	authURL := config.AuthURL + "?" + params.Encode()
 
+	fmt.Println("Opening browser for Google OAuth...")
 	if err := openBrowser(authURL); err != nil {
 		fmt.Printf("Open this URL in your browser:\n%s\n", authURL)
 	}
@@ -205,9 +212,13 @@ type tokenResponse struct {
 }
 
 func exchangeCode(ctx context.Context, code, verifier, redirectURI string) (*tokenResponse, error) {
+	creds, err := config.OAuth()
+	if err != nil {
+		return nil, err
+	}
 	body := url.Values{
-		"client_id":     {config.ClientID},
-		"client_secret": {config.ClientSecret},
+		"client_id":     {creds.ClientID},
+		"client_secret": {creds.ClientSecret},
 		"code":          {code},
 		"code_verifier": {verifier},
 		"grant_type":    {"authorization_code"},
@@ -217,9 +228,13 @@ func exchangeCode(ctx context.Context, code, verifier, redirectURI string) (*tok
 }
 
 func refreshAccessToken(ctx context.Context, refreshToken string) (*tokenResponse, error) {
+	creds, err := config.OAuth()
+	if err != nil {
+		return nil, err
+	}
 	body := url.Values{
-		"client_id":     {config.ClientID},
-		"client_secret": {config.ClientSecret},
+		"client_id":     {creds.ClientID},
+		"client_secret": {creds.ClientSecret},
 		"refresh_token": {refreshToken},
 		"grant_type":    {"refresh_token"},
 	}

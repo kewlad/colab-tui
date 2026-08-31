@@ -27,7 +27,6 @@ func newAuthLoginCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Println("Opening browser for Google OAuth...")
 			if err := m.Login(context.Background()); err != nil {
 				return err
 			}

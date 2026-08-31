@@ -2,6 +2,8 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,13 +16,9 @@ const (
 	ColabDomain     = "https://colab.research.google.com"
 	ColabGapiDomain = "https://colab.pa.googleapis.com"
 
-	// ClientID/ClientSecret are the Colab OAuth "installed app" credentials
-	// extracted from the extension (a public client secret, not a real secret).
-	ClientID     = "REDACTED-OAUTH-CLIENT-ID"
-	ClientSecret = "REDACTED-OAUTH-CLIENT-SECRET"
-	OAuthScope   = "profile email https://www.googleapis.com/auth/colaboratory"
-	TokenURL     = "https://oauth2.googleapis.com/token"
-	AuthURL      = "https://accounts.google.com/o/oauth2/v2/auth"
+	OAuthScope = "profile email https://www.googleapis.com/auth/colaboratory"
+	TokenURL   = "https://oauth2.googleapis.com/token"
+	AuthURL    = "https://accounts.google.com/o/oauth2/v2/auth"
 
 	TunBase           = "/tun/m"
 	KeepaliveInterval = 300 // seconds — HTTP /keep-alive ping + token-refresh cadence
@@ -97,6 +95,60 @@ func ConfigDir() string { return filepath.Join(ProfilesDir(), activeProfile) }
 func AuthFile() string     { return filepath.Join(ConfigDir(), "auth.json") }
 func SessionsFile() string { return filepath.Join(ConfigDir(), "sessions.json") }
 func PidDir() string       { return filepath.Join(ConfigDir(), "pids") }
+
+// OAuthFile holds the Google OAuth client credentials. It sits at the config
+// root, outside any profile dir — the credentials identify the client (this
+// tool), not the account, so every profile shares them.
+func OAuthFile() string { return filepath.Join(baseDir(), "oauth.json") }
+
+// OAuthCreds are the Colab OAuth "installed app" credentials. They belong to
+// the Colab VS Code extension, which injects them at build time; this tool
+// speaks that extension's protocol, so it needs the same pair.
+type OAuthCreds struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+}
+
+// OAuth resolves the credentials: $COLAB_CLIENT_ID / $COLAB_CLIENT_SECRET if
+// both are set, else OAuthFile(). They are deliberately not compiled in — a
+// published client secret gets auto-revoked by Google.
+func OAuth() (OAuthCreds, error) {
+	id, secret := os.Getenv("COLAB_CLIENT_ID"), os.Getenv("COLAB_CLIENT_SECRET")
+	if id != "" && secret != "" {
+		return OAuthCreds{ClientID: id, ClientSecret: secret}, nil
+	}
+
+	data, err := os.ReadFile(OAuthFile())
+	if err != nil {
+		return OAuthCreds{}, missingOAuthError()
+	}
+	var c OAuthCreds
+	if err := json.Unmarshal(data, &c); err != nil {
+		return OAuthCreds{}, fmt.Errorf("config: parse %s: %w", OAuthFile(), err)
+	}
+	if c.ClientID == "" || c.ClientSecret == "" {
+		return OAuthCreds{}, fmt.Errorf("config: %s is missing client_id or client_secret", OAuthFile())
+	}
+	return c, nil
+}
+
+func missingOAuthError() error {
+	return fmt.Errorf(`config: no Google OAuth credentials.
+
+Create %s (mode 0600):
+
+    {
+      "client_id": "<id>.apps.googleusercontent.com",
+      "client_secret": "<secret>"
+    }
+
+or set $COLAB_CLIENT_ID and $COLAB_CLIENT_SECRET.
+
+The values are the Colab VS Code extension's installed-app credentials. The
+extension injects them at build time, so they are not in its source: extract
+them from the strings of out/extension.js in an installed .vsix. They are not
+shipped here because a client secret published to a git host is auto-revoked.`, OAuthFile())
+}
 
 // MigrateLegacy moves a pre-multi-profile single-account config
 // (~/.config/colab-tui/{auth.json,sessions.json,pids}) into the "default"
