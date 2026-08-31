@@ -1,6 +1,6 @@
 ---
 name: colab-tui
-description: Drive Google Colab headlessly from the shell via the `colab` CLI (colab-tui) — run GPU model inference/training without a browser, hangs, or session reaps. Use when starting/reusing a Colab runtime, running `colab python`/`exec`/`fs`/`cp`, moving data to/from a runtime, monitoring a long Colab job, recovering from an idle-reap or kernel hang, or when something in the colab-tui tool itself is broken or could be improved (repo at ~/src/colab-tui).
+description: Drive Google Colab headlessly from the shell via the `colab` CLI (colab-tui) — run GPU model inference/training without a browser, hangs, or session reaps. Use when starting/reusing a Colab runtime, running `colab python`/`exec`/`fs`/`cp`, moving data to/from a runtime, monitoring a long Colab job, recovering from an idle-reap or kernel hang, or when something in the colab-tui tool itself is broken or could be improved.
 ---
 
 # Driving Colab headlessly (colab-tui)
@@ -8,8 +8,8 @@ description: Drive Google Colab headlessly from the shell via the `colab` CLI (c
 `colab` (`~/.local/bin/colab`) is a Go CLI that manages Google Colab runtimes without VS Code, by
 speaking the official Colab VS Code extension protocol. Auth/state live in `~/.config/colab-tui/`.
 
-**This skill's source lives in the tool's repo** (`~/src/colab-tui/.claude/skills/colab-tui/`,
-symlinked into `~/.claude/skills/`) — tool, repo `CLAUDE.md`, and skill are version-controlled together.
+**This skill's source lives in the tool's repo** (`docs/agent-skill/`; install it by symlinking that
+directory into `~/.claude/skills/colab-tui`) — tool, repo `CLAUDE.md`, and skill are versioned together.
 It is **self-improving**: if a workflow here is wrong or missing, edit this file; if the *tool* misbehaves
 or lacks a capability, fix the Go codebase (see [Improving the tool](#improving-the-tool)). Don't paper
 over a tool bug — fix it once.
@@ -442,7 +442,7 @@ fresh + resume from checkpoint.
   runtime that already holds the data** rather than assembling them locally and uploading. Fuse is fine
   for a handful of files (listings, a few CSVs), never for a corpus.
 - gdrive hygiene: persistent/reusable/Colab-readable data only, **not scratch**; one-off intermediates →
-  local. Default account = `mydrive`.
+  local. Default remote = `mydrive` (example name — use your own).
 
 ## Fresh-runtime gotchas
 
@@ -451,9 +451,9 @@ fresh + resume from checkpoint.
   ⭐ The checkpoint records which version wrote it — `torch.load(ckpt, map_location="cpu",
   weights_only=False)["version"]` (also `["date"]`). Read it rather than guessing or installing latest;
   a version skew silently changes head/loss internals on a model you are only trying to score.
-- For S3 work **don't import a heavy in-house SDK on the runtime** (its `__init__` builds a ~150 MB reverse-geocoder
-  KDTree) — resolve keys locally, pass a tiny `{dp_id: s3_key}` JSON, use **boto3 directly** (bucket
-  `my-bucket`, region `eu-west-1`).
+- For S3 work **don't import a heavy in-house SDK on the runtime** — a package whose `__init__` builds
+  a large index (a ~150 MB reverse-geocoder KDTree, in one real case) costs minutes per runtime. Resolve
+  keys locally, pass a tiny `{id: s3_key}` JSON, and use **boto3 directly** on the runtime.
 - **Stability probe** (platform vs method): run a trivial busy cell (timestamp every 10 s for ~12 min) and
   watch via `colab exec`. Survives → runtime fine, failure is your launch method. Dies → platform/throttling.
 
@@ -545,7 +545,7 @@ account at 295, resumed the remaining 338 on a Free account's fresh 6 CCU — sa
 You're encouraged to fix/extend colab-tui when you hit a limitation — that's how `fs`, `health`, `quota`,
 `--detach`, and the connection-holding keepalive were added. The build/test commands, package layout, the
 full protocol map (two hosts, headers, endpoints), and the develop-the-tool loop live in the repo
-**`CLAUDE.md`** (`~/src/colab-tui/CLAUDE.md`) — **read it before touching the protocol layer**.
+**`CLAUDE.md`** (`CLAUDE.md`, repo root) — **read it before touching the protocol layer**.
 Keep changes surgical, rebuild onto PATH, verify on a live runtime, then update this skill.
 
 ## Memory & maintenance

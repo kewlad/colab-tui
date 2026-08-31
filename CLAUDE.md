@@ -16,7 +16,7 @@ go build -o ~/.local/bin/colab ./cmd/colab   # build straight onto PATH (overwri
 The `colab-tui` skill tells agents to fix this tool when they hit a limitation — that's how `fs`,
 `health`, `quota`, `--detach`, and the connection-holding keepalive were added. The loop:
 **read this file (esp. the protocol section below) → make a surgical change → `go test` → build onto
-PATH → verify on a live runtime → update the skill (`.claude/skills/colab-tui/SKILL.md`) if behavior
+PATH → verify on a live runtime → update the skill (`docs/agent-skill/SKILL.md`) if behavior
 changed.** Match existing style; don't touch the protocol layer without reading the v0.8.1 section.
 
 ## Architecture

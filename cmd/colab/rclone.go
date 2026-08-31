@@ -139,8 +139,8 @@ func newCpCmd() *cobra.Command {
 		Use:   "cp SRC DST",
 		Short: "Copy files between an rclone remote and the runtime (rclone copy, no mount)",
 		Long: `Runs 'rclone copy SRC DST' on the runtime. Examples:
-  colab cp mydrive:data/x.mp4 /content/      # pull input to the box
-  colab cp /content/runs/exp1 mydrive:runs/exp1         # push outputs back
+  colab cp mydrive:data/x.mp4 /content/          # pull input to the box
+  colab cp /content/runs/exp1 mydrive:runs/exp1  # push outputs back
 Requires the remote to be set up first (colab rclone setup REMOTE, or
 colab start --rclone REMOTE).`,
 		Args: cobra.ExactArgs(2),
