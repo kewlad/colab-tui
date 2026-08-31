@@ -40,6 +40,12 @@ even a fresh runtime in minutes.
 - `colab list` — reconciled with the server; lists every assigned runtime + resources, prunes STALE
   local entries.
 - `colab quota` — compute-unit balance, burn rate, runway, per-runtime attribution. Check before a long GPU job.
+- ⛔⛔ **CHECK `nproc` BEFORE BLAMING THE MODEL — a T4 runtime ships with 2 vCPUs, an L4 with 12.**
+  Measured 2026-08-30: a per-frame detection job read **1.5 frames/s** on the T4 with the GPU idle
+  ~50% of every sample, because decode + letterbox + NMS are CPU work and 2 cores cannot feed the
+  GPU. Same code on an L4: **7.2 f/s**. If a GPU job feels slow, sample `nvidia-smi
+  --query-gpu=utilization.gpu` a few times — a low, spiky number means you are CPU- or IO-bound, and
+  a bigger accelerator is often the cheaper fix *per job* even at a higher hourly rate.
 - `colab resources` (alias `top`) — RAM/disk/GPU on the runtime.
 
 ## Quick start (headless, no browser)
@@ -123,6 +129,30 @@ The tool will redirect you if you slip.
 | pip / shell command | `colab exec "pip install …"` (TTY; `--kernel` forces the robust channel) |
 | Detached shell job | `colab exec --bg "…" ` → `colab logs`. ⚠ outside the kernel → **reaped past ~2.5 h** AND no shared env/auth with other `--bg` shells; for long jobs use `python --detach` |
 
+⛔⛔ **RESTARTING A DAEMON WITH `pgrep || start` KEEPS ITS STALE IN-MEMORY CONFIG.** Measured
+2026-08-30: a checkpoint pusher was edited to add a new run name, re-uploaded with `colab fs put`,
+and "restarted" with `pgrep -f pusher >/dev/null || (start it)`. Three copies were already running,
+so the guard short-circuited and every one of them kept the OLD arm list read at ITS start. The
+FILE on disk was correct; the PROCESSES were not. Result: **~7 h of training with no checkpoint
+backup**, and the log said `nothing new this tick` every 5 minutes — indistinguishable from "there
+is nothing to push". Only an attempt to PULL a checkpoint revealed it.
+⇒ After editing a long-running helper, **kill and restart unconditionally, in separate calls, then
+verify the NEW behaviour** (not just that a process exists): `pkill -f x` → confirm the count is 0 →
+start one → confirm it logs the thing you just added. And check the DESTINATION independently
+(`rclone lsl`) rather than trusting the daemon's own log — see the per-epoch checkpoint rule above.
+⚠ `pkill -f <name>` from `colab exec` also matches the exec shell itself and returns 143; that is
+expected, so verify with a separate `ps | grep | wc -l` call rather than reading the exit code.
+
+⛔⛔ **`colab python` does NOT — a cell that RAISES still returns exit 0.** Measured 2026-08-29: a
+cell whose very first import died (`ModuleNotFoundError: ultralytics`, because the script was run
+directly instead of through a bootstrap that pip-installs it) reported **exit code 0**, and the
+traceback was invisible because the caller was piping through a `grep` for result lines. So an
+`exit 0` from `colab python` means "the kernel accepted the cell", NOT "the code worked".
+⇒ **Judge a kernel cell by its ARTIFACT, never its exit status** — poll for the output file it was
+supposed to write (`ls`, or local `rclone lsf` on the gdrive copy). And never pipe a cell's output
+through a filter that can swallow a traceback; tail it raw first, filter second. Same family as the
+stale-log trap below.
+
 ✅ **`colab exec` propagates the remote exit status** (fixed + live-verified 2026-08-10; it used to
 always exit 0). So it CAN be used as a condition on both channels and in `colab cp`:
 
@@ -138,6 +168,15 @@ A failure prints `[colab] command exited N` to **stderr** (stdout stays the comm
 status can't be read back it warns `exit status unavailable` and exits 0 — so a silent 0 is never a
 disguised failure. Still prefer a **content-based** check (poll a gdrive checkpoint with local
 `rclone`) for anything you'd walk away from: it survives a reap, an exit status doesn't.
+
+⛔⛔ **A LOCAL timeout on `colab python` kills the CLI, NOT the cell — re-running LAUNCHES A SECOND
+JOB.** Measured 2026-08-30: `timeout 120 colab python -f launch.py` returned exit 143, so it looked
+like nothing had started; the re-run produced **two** processes writing the same output files and
+`os.remove()`-ing each other's downloads. The cell had been running the whole time. ⇒ After any
+`colab python` that times out or errors *client-side*, **check `colab health` (Kernel: busy) and
+`ps -eo pid,etime,cmd | grep <script>` BEFORE relaunching**, and make the launcher refuse to start if
+its own process is already alive. Same family as the stale-log trap: a client-side failure and a
+never-started job look identical.
 
 **Don't queue cells:** a second `colab python` blocks behind a busy cell. Monitor via a separate channel —
 `colab exec "tail …"` (TTY is independent of the kernel) or, better, local `rclone` on gdrive checkpoints.
@@ -195,6 +234,15 @@ Use the **absolute** `colab` path — ssh runs the ProxyCommand in a non-login s
    have wiped. **Print the byte count on success and the stderr tail on failure**, and print
    explicitly when a file was skipped because it did not exist yet — `if not p.exists(): continue`
    is the other silent path, and at the first epoch it is always taken.
+   ⛔⛔ **DEDUPE A CHECKPOINT PUSH ON MTIME, NEVER ON SIZE.** An ultralytics `last.pt` is the
+   SAME NUMBER OF BYTES every epoch (92,384,281 here), so a `if seen[src] == size: skip` guard is
+   true from the second tick onward: it pushes once at epoch 1 and then skips **in silence** for the
+   rest of the run, and the log is indistinguishable from "nothing new to push". Measured
+   2026-08-25 — caught only because the byte count was printed and never changed. Key on
+   `os.path.getmtime`.
+   ⭐ Run the pusher as its own process (`nohup python -u pusher.py &`), not as a thread inside the
+   training cell: it then survives an interrupt or a crash of the cell that is producing the very
+   checkpoints you are trying to save.
    ⚠ And **verify the destination independently at least once mid-run** (`rclone lsl <dest>`), not
    at the end. The whole point is to find out while the runtime is still alive.
 3. **Resume-skip on relaunch** (`YOLO(last.pt).train(resume=True)`, or skip done units). A killed `--bg`
@@ -218,6 +266,32 @@ Use the **absolute** `colab` path — ssh runs the ProxyCommand in a non-login s
    For fleet/gdrive-marker monitoring use ONE recurring loop (check via local `rclone lsf <gdrive>/DONE`)
    — never N one-shot `until…;sleep` shells; they leak.
 
+## ⛔⛔ A JOB THAT FINISHED SUSPICIOUSLY FAST HAS NOT SUCCEEDED QUICKLY — IT USUALLY DID NOT RUN
+
+Measured 2026-08-31, three times in twenty minutes on one timing job, each failure wearing the
+costume of speed:
+
+| what happened | what it printed |
+|---|---|
+| SAM3 is a **gated HF repo**, no token | `0 frames in 13 s` |
+| the script globs a **hardcoded** `/content/img/*.jpg` and ignores your `IMG` env | `frames to process: 0`, `23 s` |
+| a **resumed** run skips every frame already done | a triumphant near-zero, no error |
+
+All three exit 0. A wall-clock number divided by a zero work count is not a fast run, it is a
+missing one — and if you are timing something, the bogus number is *exactly* the output you were
+looking for.
+
+⭐ **The guard, and it is two lines:**
+
+```python
+assert done > 0, "⛔ ZERO units processed — this is a FAILURE, not a fast run"
+print(f"processed {done}/{expected}")     # print BOTH, always
+```
+
+⇒ Also: **`RESUME=0` and a fresh output dir for any timing or smoke run**, and **assert the scale in
+the first log line** (`frames to process: N`) before walking away. Same family as the stale-log trap
+above — there, an old line satisfied the watcher; here, an empty loop satisfies the stopwatch.
+
 ## ⛔⛔ A REAP MASQUERADES AS A DOZEN OTHER BUGS — check `/content` FIRST
 
 2026-08-12, cost most of an evening. A runtime reaped **while I sat idle debugging** (keepalive alive,
@@ -238,6 +312,66 @@ A file you uploaded that is missing means a reap, not a bug in your code. `colab
 the gap while I debugged. Put re-stage **and** launch in ONE kernel cell (`colab python -f bootstrap.py`)
 so the kernel is busy from the first second, assert the dataset shape inside that cell before the
 expensive step, and keep the per-epoch gdrive push so the next reap costs one epoch instead of the run.
+
+## ⛔⛔ `pkill`/`pgrep -f <pattern>` MATCHES THE SHELL RUNNING IT
+
+Hit **three times in one session** (2026-08-25), and each time it read as a different bug.
+
+`colab exec "pkill -f z6_hybrid"` killed the exec session itself (`[colab] command exited 143`) and
+**left the training running**. I believed I had stopped a doomed run; it kept burning L4 minutes and
+crashed on its own 8 minutes later. The pattern is matched against every process command line —
+including the `bash -c` wrapper that holds your own pattern as literal text.
+
+Same trap in a local wait loop: `while pgrep -f push_to_runtime.sh; do sleep 20; done` **never
+exits**, because the backgrounded `bash -c` running it contains that string. The job looked hung.
+
+⇒ **Use the bracket trick, and then VERIFY with a count** — a kill you did not confirm is a wish:
+```bash
+colab exec "pkill -f 'launch[.]py'; sleep 3; ps -eo pid,cmd | grep -c '[l]aunch.py'"   # expect 0
+ps -eo pid,cmd | grep 'push_to_runtime[.]sh' | grep -v grep | awk '{print $1}' | xargs -r kill
+```
+The regex `launch[.]py` matches the text `launch.py` but NOT the literal `launch[.]py` sitting in
+your own command line.
+
+⛔⛔ **THE BRACKET TRICK FAILS IF THE SAME COMMAND ALSO CONTAINS AN UNBRACKETED OCCURRENCE.** Hit on
+the 4th repeat: `pkill -f 'ckpt_pusher[.]py'; ... nohup python3 -u ckpt_pusher.py &` — the bracketed
+pattern is safe, but the **restart half of the same line** carries the bare `ckpt_pusher.py`, so the
+regex matched the shell after all and killed it mid-command. ⇒ **Never combine a kill and a restart
+of the same program in one `colab exec`.** Kill in one call, verify with a count in a second, restart
+in a third. And when restarting a detached helper, use `setsid nohup … < /dev/null & disown` so it
+does not die with the TTY. Prefer waiting on the harness's own completion notification over a `pgrep`
+loop entirely.
+
+## ⭐⭐ A MARKER CHECK PROVES THE CODE SHIPPED; ONLY RUNNING IT PROVES THE CODE RUNS
+
+A launcher asserted its changed lines were present in the extracted file on the runtime — they were —
+then started a 30-epoch run. The change broke a tensor shape in the **validation** path, so it died
+at the **end of epoch 1**, after a full epoch of GPU time, and the control arm repeated the identical
+fault 8 minutes later. Grepping for your own edit only proves the transfer worked.
+
+⇒ **Before any long run, execute the cheapest thing that reaches the same code paths**, and gate the
+expensive part on it. Ultralytics recipes here have `launch.py --preflight-val` (walks
+`_setup_train()` + `validate()`, trains nothing). Re-run with that gate in front: the same failure
+surfaced in **3 seconds**. Make the gate an `assert`, so a failure cannot fall through to training.
+
+⭐ Pair it with the arithmetic/logic screen you can run **locally on CPU in seconds** — a synthetic
+input through the changed function. That is what caught a threshold bug that would not have crashed
+at all, just silently produced a degenerate control arm. See
+[[control-arm-can-be-silently-degenerate]].
+
+⛔ And make the completion marker CARRY THE VERDICT. A launcher that writes a bare `done` even when
+an arm exited non-zero turns your watcher into a rubber stamp. Write `ALL_OK`/`FAILED <arm>=exitN`.
+
+## Chaining two passes on one runtime (so the GPU never idles between them)
+
+⛔⛔ **`kill -0 <pid>` SUCCEEDS ON A ZOMBIE.** The obvious chain — `while kill -0 $PID; do sleep 60;
+done; next_job` — waits **forever**: a detached job launched from a kernel cell is never reaped by
+its parent, so it sits at `STAT Z` `<defunct>` with its PID entry alive. Measured 2026-08-30; the
+second pass never started and the runtime idled instead.
+⇒ test the **state**, not the PID: `[ "$(ps -o stat= -p $PID 2>/dev/null | tr -d ' ')" = "" ] ||
+case $(ps -o stat= -p $PID) in *Z*) break;; esac`, or simply poll the job's own completion sentinel
+(a `DONE` line, or the expected output count) rather than the process. A content check survives a
+reap too; a PID check does not.
 
 ## Diagnosing a stuck / dead runtime
 
@@ -273,6 +407,16 @@ fresh + resume from checkpoint.
   when the data changes (an instance count, a config hash). Do the same after upload, from the
   remote copy. ⚠ And beware self-matching `pkill` patterns: `pkill -f "foo.tar"` run from a shell
   whose own command line contains `foo.tar` kills that shell — which is how the stale tar survived.
+- ⛔⛔ **When REPLACING a shipped bundle, match its TOP-LEVEL STRUCTURE — list the original first.**
+  A separate failure from the content check above, and it passes every content check. Rebuilding a
+  `code.tgz` from a repo root produced `recipes/stageA_hybrid/...` where the shipped one had
+  `stageA_hybrid/...`; the tar was valid, the file inside it was correct, and the runtime would have
+  extracted it to a path nothing reads — a silent no-op that looks like a successful re-stage.
+  ⇒ `tar -tzf <shipped>.tgz | head` FIRST, build to match, then verify by reading a changed line
+  back out with `tar -xOf`. ⭐ Also `stat -c%s` the result: mine jumped 96 KB -> 9.5 MB because a
+  debug-image directory had appeared in the source tree since the bundle was last built.
+  ⭐ And copy the shipped bundle aside (`code_pre<change>.tgz`) before overwriting — it is the only
+  rollback, and gdrive keeps no history you can reach from here.
 - ⛔ **Re-stage with `rclone copyto`, never `rclone delete && rclone copy`.** The delete-then-copy
   pair has a window where the delete has landed and the copy has not, and *any* interruption in it
   (a tool timeout backgrounding the command, a network blip) leaves the path EMPTY. No timeout
@@ -312,6 +456,47 @@ fresh + resume from checkpoint.
   `my-bucket`, region `eu-west-1`).
 - **Stability probe** (platform vs method): run a trivial busy cell (timestamp every 10 s for ~12 min) and
   watch via `colab exec`. Survives → runtime fine, failure is your launch method. Dies → platform/throttling.
+
+## ⛔⛔ TWO RUNTIMES ARE NOT TWO COPIES OF ONE ENVIRONMENT (paired A/B runs)
+
+Running a control on one runtime and an arm on another is the normal shape for an ablation, and it
+is where a silent second variable gets in. **Each runtime image ships its own preinstalled package
+versions**, so an arm whose bootstrap forgot the control's pin comes up on a *different trainer* —
+and every knob you did copy will still match perfectly.
+
+Measured 2026-08-31: control pinned `ultralytics==8.4.118`, arm inherited the runtime's **8.4.75**.
+The arm's bootstrap had been written by copying every `REP_*` env knob out of the control's; the
+line it did not copy was the `pip install` two functions above them. 43 patch versions of the
+trainer, in a run whose entire purpose was to isolate one knob. Caught 2 epochs in (2 h of L4).
+
+⭐ **The check, and it takes seconds — diff the framework's own resolved config, not your env vars.**
+Ultralytics writes `args.yaml` per run, so a library difference shows up as **keys present on one
+side and absent on the other** (here `cls_remap`, `channels_last`, `quantize`, the distillation
+keys, a different default tracker). No amount of reviewing your own launch env would reveal any of
+it:
+
+```bash
+colab fs get /content/runs/<CTRL>/<CTRL>/args.yaml m.yaml --label <a>
+colab fs get /content/runs/<ARM>/<ARM>/args.yaml   f.yaml --label <b>
+diff m.yaml f.yaml       # PASS = only project / name / save_dir
+```
+
+⚠ A knob read by your own recipe code (a dataset-transform env var) correctly does **not** appear in
+`args.yaml`. "Only 3 lines differ" is the pass condition — *not* "my knob shows up".
+
+⭐⭐ **An arm inherits its control's KNOBS by being copied; it inherits the control's ENVIRONMENT and
+SCAFFOLDING only if you copy those too.** The same diff exposed that the arm had **no checkpoint
+pusher at all** — no process, and `rclone lsl <dest>` said *directory not found*. That is past
+write-only checkpointing; a reap would have returned nothing. Per-arm checklist before epoch 2:
+
+1. **Pin the library inside the ARM's own bootstrap and assert it** (`pip install …==X`, then
+   `assert mod.__version__ == "X"`, then log it). Never rely on the runtime, and never rely on
+   having run the control's installer earlier in the session.
+2. **`diff args.yaml` arm vs control.**
+3. **Pusher running for THIS arm** (`pgrep`) *and* the remote directory actually present
+   (`rclone lsl <dest>`), started **before** the trainer so epoch 0 is covered.
+
+Left alone, none of these crash. They produce a *number* — the kind you act on.
 
 ## Cost & accounts
 
