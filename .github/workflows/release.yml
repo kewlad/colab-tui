@@ -1,9 +1,9 @@
-name: Build & Release colab-tui (All OS & Arch)
+name: Build & Release colab-tui
 
 on:
   workflow_dispatch:
   push:
-    branches: [master, main]
+    branches: [master]
 
 jobs:
   build:
@@ -14,22 +14,14 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            ext: ""
           - goos: linux
             goarch: arm64
-            ext: ""
           - goos: android
             goarch: arm64
-            ext: ""
           - goos: darwin
             goarch: amd64
-            ext: ""
           - goos: darwin
             goarch: arm64
-            ext: ""
-          - goos: windows
-            goarch: amd64
-            ext: ".exe"
 
     steps:
       - name: Checkout fork
@@ -44,14 +36,14 @@ jobs:
         run: |
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -ldflags="-s -w" \
-            -o colab-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
+            -o colab-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/colab
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: colab-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: colab-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          path: colab-${{ matrix.goos }}-${{ matrix.goarch }}
           if-no-files-found: error
 
   release:
