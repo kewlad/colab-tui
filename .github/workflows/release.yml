@@ -1,0 +1,75 @@
+name: Build & Release colab-tui (All OS & Arch)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: android
+            goarch: arm64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Set up Go 1.25+
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build binary (${{ matrix.goos }}-${{ matrix.goarch }})
+        run: |
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w" \
+            -o colab-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
+            ./cmd/colab
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: colab-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: colab-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish atomic release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Prebuilt Binaries
+          make_latest: "true"
+          files: dist/*
