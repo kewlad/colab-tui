@@ -30,13 +30,10 @@ jobs:
             goarch: riscv64
             name: colab-linux-riscv64
 
-          # Android (Native Termux — Note: 32-bit Termux uses colab-linux-armv7 above)
+          # Android (Native Termux — 32-bit/x86_64 Termux use colab-linux-armv7 / colab-linux-x86_64)
           - goos: android
             goarch: arm64
             name: colab-android-arm64
-          - goos: android
-            goarch: amd64
-            name: colab-android-x86_64
 
           # macOS (Apple Silicon & Intel Macs)
           - goos: darwin
